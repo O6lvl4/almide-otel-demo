@@ -1,5 +1,7 @@
 # almide-otel-demo
 
+日本語版: [README.ja.md](./README.ja.md)
+
 A from-scratch OpenTelemetry tracing SDK written in pure [Almide](https://github.com/almide/almide) — about 150 lines — plus a two-service demo that produces one distributed trace in Jaeger.
 
 There is no OpenTelemetry Collector and no SDK dependency. Spans are encoded as OTLP/HTTP + JSON and posted straight to Jaeger's native OTLP endpoint. Context crosses the HTTP boundary as a W3C `traceparent` header.
