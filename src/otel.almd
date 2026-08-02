@@ -45,12 +45,11 @@ effect fn tracer(service: String, endpoint: String) -> Tracer = {
   Tracer { service: service, endpoint: endpoint, anchor: anchor }
 }
 
-effect fn rand_bytes(n: Int) -> List[Int] =
-  if n == 0 then ([]: List[Int])
-  else [random.int(0, 255)] + rand_bytes(n - 1)!
-
 effect fn rand_hex(n_bytes: Int) -> String =
-  rand_bytes(n_bytes)! |> bytes.from_list |> hex.encode
+  list.range(0, n_bytes)
+    |> list.map((_) => random.int(0, 255))
+    |> bytes.from_list
+    |> hex.encode
 
 effect fn now_ns(t: Tracer) -> Int = t.anchor + datetime.monotonic_ns()
 
@@ -70,7 +69,7 @@ effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: Spa
     kind: kind,
     start_ns: ts,
     end_ns: 0,
-    attrs: ([]: List[(String, String)]),
+    attrs: [],
   }
 }
 
