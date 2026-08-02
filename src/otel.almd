@@ -99,50 +99,60 @@ fn parse_traceparent(h: String) -> Option[SpanCtx] = {
 }
 
 // ── OTLP/HTTP JSON encoding ──
+// Wire-mirror record types: field names ARE the OTLP wire names, so the
+// derived Codec produces the document and the only hand-written logic is
+// the Span→wire transform (kind code, nanos-as-string per the proto3 JSON
+// mapping for fixed64, parentSpanId "" on roots).
 
-fn attr_json(entry: (String, String)) -> Value = {
+type OtlpAttrValue: Codec = { stringValue: String }
+type OtlpAttr: Codec = { key: String, value: OtlpAttrValue }
+type OtlpStatus: Codec = { code: Int }
+type OtlpSpan: Codec = {
+  traceId: String,
+  spanId: String,
+  parentSpanId: String,  // "" = root (proto3 default = unset; Jaeger 400s on null)
+  name: String,
+  kind: Int,
+  startTimeUnixNano: String,
+  endTimeUnixNano: String,
+  attributes: List[OtlpAttr],
+  status: OtlpStatus,
+}
+type OtlpScope: Codec = { name: String, version: String }
+type OtlpScopeSpans: Codec = { scope: OtlpScope, spans: List[OtlpSpan] }
+type OtlpResource: Codec = { attributes: List[OtlpAttr] }
+type OtlpResourceSpans: Codec = { resource: OtlpResource, scopeSpans: List[OtlpScopeSpans] }
+type OtlpPayload: Codec = { resourceSpans: List[OtlpResourceSpans] }
+
+fn attr(entry: (String, String)) -> OtlpAttr = {
   let (k, v) = entry
-  json.object([
-    ("key", json.from_string(k)),
-    ("value", json.object([("stringValue", json.from_string(v))])),
-  ])
+  OtlpAttr { key: k, value: OtlpAttrValue { stringValue: v } }
 }
 
-fn span_json(s: Span) -> Value = {
-  // proto3 JSON mapping: fixed64 fields (the two timestamps) are strings
-  let base = [
-    ("traceId", json.from_string(s.trace_id)),
-    ("spanId", json.from_string(s.span_id)),
-    ("name", json.from_string(s.name)),
-    ("kind", json.from_int(kind_code(s.kind))),
-    ("startTimeUnixNano", json.from_string(int.to_string(s.start_ns))),
-    ("endTimeUnixNano", json.from_string(int.to_string(s.end_ns))),
-    ("attributes", json.array(s.attrs |> list.map(attr_json))),
-    ("status", json.object([("code", json.from_int(1))])),
-  ]
-  let fields =
-    if s.parent_span_id == "" then base
-    else base + [("parentSpanId", json.from_string(s.parent_span_id))]
-  json.object(fields)
-}
+fn span_wire(s: Span) -> OtlpSpan =
+  OtlpSpan {
+    traceId: s.trace_id,
+    spanId: s.span_id,
+    parentSpanId: s.parent_span_id,
+    name: s.name,
+    kind: kind_code(s.kind),
+    startTimeUnixNano: int.to_string(s.start_ns),
+    endTimeUnixNano: int.to_string(s.end_ns),
+    attributes: s.attrs |> list.map(attr),
+    status: OtlpStatus { code: 1 },
+  }
 
 fn payload(t: Tracer, spans: List[Span]) -> String = {
-  let resource = json.object([
-    ("attributes", json.array([attr_json(("service.name", t.service))])),
-  ])
-  let scope = json.object([
-    ("name", json.from_string("almide-otel")),
-    ("version", json.from_string("0.1.0")),
-  ])
-  let scope_spans = json.object([
-    ("scope", scope),
-    ("spans", json.array(spans |> list.map(span_json))),
-  ])
-  let resource_spans = json.object([
-    ("resource", resource),
-    ("scopeSpans", json.array([scope_spans])),
-  ])
-  json.stringify(json.object([("resourceSpans", json.array([resource_spans]))]))
+  let doc = OtlpPayload {
+    resourceSpans: [OtlpResourceSpans {
+      resource: OtlpResource { attributes: [attr(("service.name", t.service))] },
+      scopeSpans: [OtlpScopeSpans {
+        scope: OtlpScope { name: "almide-otel", version: "0.1.0" },
+        spans: spans |> list.map(span_wire),
+      }],
+    }],
+  }
+  json.stringify(OtlpPayload.encode(doc))
 }
 
 // Returns the collector's response body ({"partialSuccess":{}} = accepted)
