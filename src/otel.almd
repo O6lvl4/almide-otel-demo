@@ -1,0 +1,145 @@
+// Minimal OpenTelemetry tracing SDK for Almide.
+// Traces only. Export: OTLP/HTTP + JSON (proto3 JSON mapping).
+// Context propagation: W3C Trace Context (traceparent header).
+import json
+import http
+import random
+
+// Span kinds (OTLP enum values)
+let KIND_INTERNAL = 1
+let KIND_SERVER = 2
+let KIND_CLIENT = 3
+
+type Tracer = {
+  service: String,
+  endpoint: String,
+  // wall-clock ns at monotonic zero: anchor once, derive all span
+  // timestamps from the monotonic clock (same trick as real SDKs —
+  // datetime.now() is second-precision, monotonic_ns() fills the gap)
+  anchor: Int,
+}
+
+type SpanCtx = { trace_id: String, span_id: String }
+
+type Span = {
+  trace_id: String,
+  span_id: String,
+  parent_span_id: String,  // "" = root
+  name: String,
+  kind: Int,
+  start_ns: Int,
+  end_ns: Int,
+  attrs: List[(String, String)],
+}
+
+effect fn tracer(service: String, endpoint: String) -> Tracer = {
+  let anchor = datetime.now() * 1_000_000_000 - datetime.monotonic_ns()
+  Tracer { service: service, endpoint: endpoint, anchor: anchor }
+}
+
+effect fn rand_bytes(n: Int) -> List[Int] =
+  if n == 0 then ([]: List[Int])
+  else [random.int(0, 255)] + rand_bytes(n - 1)!
+
+effect fn rand_hex(n_bytes: Int) -> String =
+  rand_bytes(n_bytes)! |> bytes.from_list |> hex.encode
+
+effect fn now_ns(t: Tracer) -> Int = t.anchor + datetime.monotonic_ns()
+
+// parent = none → new root span (fresh trace_id)
+// parent = some(ctx) → child span in the same trace
+effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: Int) -> Span = {
+  let fresh_tid = rand_hex(16)!
+  let sid = rand_hex(8)!
+  let ts = now_ns(t)!
+  let tid = match parent { some(c) => c.trace_id, none => fresh_tid }
+  let pid = match parent { some(c) => c.span_id, none => "" }
+  Span {
+    trace_id: tid,
+    span_id: sid,
+    parent_span_id: pid,
+    name: name,
+    kind: kind,
+    start_ns: ts,
+    end_ns: 0,
+    attrs: ([]: List[(String, String)]),
+  }
+}
+
+effect fn end_span(t: Tracer, s: Span) -> Span = {
+  let ts = now_ns(t)!
+  { ...s, end_ns: ts }
+}
+
+fn with_attr(s: Span, key: String, val: String) -> Span =
+  { ...s, attrs: s.attrs + [(key, val)] }
+
+fn ctx(s: Span) -> SpanCtx =
+  SpanCtx { trace_id: s.trace_id, span_id: s.span_id }
+
+// ── W3C Trace Context ──
+
+fn traceparent(s: Span) -> String = "00-${s.trace_id}-${s.span_id}-01"
+
+fn parse_traceparent(h: String) -> Option[SpanCtx] = {
+  let parts = string.split(h, "-")
+  let tid = list.get(parts, 1) ?? ""
+  let sid = list.get(parts, 2) ?? ""
+  if list.len(parts) == 4 and string.len(tid) == 32 and string.len(sid) == 16
+  then some(SpanCtx { trace_id: tid, span_id: sid })
+  else none
+}
+
+// ── OTLP/HTTP JSON encoding ──
+
+fn attr_json(entry: (String, String)) -> Value = {
+  let (k, v) = entry
+  json.object([
+    ("key", json.from_string(k)),
+    ("value", json.object([("stringValue", json.from_string(v))])),
+  ])
+}
+
+fn span_json(s: Span) -> Value = {
+  // proto3 JSON mapping: fixed64 fields (the two timestamps) are strings
+  let base = [
+    ("traceId", json.from_string(s.trace_id)),
+    ("spanId", json.from_string(s.span_id)),
+    ("name", json.from_string(s.name)),
+    ("kind", json.from_int(s.kind)),
+    ("startTimeUnixNano", json.from_string(int.to_string(s.start_ns))),
+    ("endTimeUnixNano", json.from_string(int.to_string(s.end_ns))),
+    ("attributes", json.array(s.attrs |> list.map(attr_json))),
+    ("status", json.object([("code", json.from_int(1))])),
+  ]
+  let fields =
+    if s.parent_span_id == "" then base
+    else base + [("parentSpanId", json.from_string(s.parent_span_id))]
+  json.object(fields)
+}
+
+fn payload(t: Tracer, spans: List[Span]) -> String = {
+  let resource = json.object([
+    ("attributes", json.array([attr_json(("service.name", t.service))])),
+  ])
+  let scope = json.object([
+    ("name", json.from_string("almide-otel")),
+    ("version", json.from_string("0.1.0")),
+  ])
+  let scope_spans = json.object([
+    ("scope", scope),
+    ("spans", json.array(spans |> list.map(span_json))),
+  ])
+  let resource_spans = json.object([
+    ("resource", resource),
+    ("scopeSpans", json.array([scope_spans])),
+  ])
+  json.stringify(json.object([("resourceSpans", json.array([resource_spans]))]))
+}
+
+// Returns the collector's response body ({"partialSuccess":{}} = accepted)
+effect fn export(t: Tracer, spans: List[Span]) -> String = {
+  let headers = map.from_list([("Content-Type", "application/json")])
+  let resp = http.request("POST", t.endpoint, payload(t, spans), headers)!
+  resp
+}

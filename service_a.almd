@@ -1,0 +1,24 @@
+// Checkout service (one-shot client): root span + client span,
+// propagates traceparent to the inventory service.
+import http
+import process
+import self.otel
+
+effect fn main() -> Unit = {
+  let t = otel.tracer("almide-checkout", "http://localhost:4318/v1/traces")!
+
+  let root0 = otel.start_span(t, none, "checkout", otel.KIND_INTERNAL)!
+  let root = otel.with_attr(root0, "order.id", "A-1042")
+
+  let call0 = otel.start_span(t, some(otel.ctx(root)), "GET /inventory", otel.KIND_CLIENT)!
+  let headers = map.from_list([("traceparent", otel.traceparent(call0))])
+  let resp = http.request("GET", "http://localhost:7002/inventory", "", headers)!
+  let call = otel.end_span(t, otel.with_attr(call0, "peer.service", "almide-inventory"))!
+
+  process.sleep(10)  // simulated post-processing
+  let done = otel.end_span(t, root)!
+
+  let _ = otel.export(t, [done, call])!
+  println("inventory says: ${resp}")
+  println("trace: ${done.trace_id}")
+}
