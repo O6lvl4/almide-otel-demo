@@ -5,10 +5,18 @@ import json
 import http
 import random
 
-// Span kinds (OTLP enum values)
-let KIND_INTERNAL = 1
-let KIND_SERVER = 2
-let KIND_CLIENT = 3
+// The five OTLP span kinds. `kind_code` maps to the wire enum —
+// the full matrix, matching opentelemetry-proto's SpanKind.
+type SpanKind = Internal | Server | Client | Producer | Consumer
+
+fn kind_code(k: SpanKind) -> Int =
+  match k {
+    Internal => 1,
+    Server   => 2,
+    Client   => 3,
+    Producer => 4,
+    Consumer => 5,
+  }
 
 type Tracer = {
   service: String,
@@ -26,7 +34,7 @@ type Span = {
   span_id: String,
   parent_span_id: String,  // "" = root
   name: String,
-  kind: Int,
+  kind: SpanKind,
   start_ns: Int,
   end_ns: Int,
   attrs: List[(String, String)],
@@ -48,7 +56,7 @@ effect fn now_ns(t: Tracer) -> Int = t.anchor + datetime.monotonic_ns()
 
 // parent = none → new root span (fresh trace_id)
 // parent = some(ctx) → child span in the same trace
-effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: Int) -> Span = {
+effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: SpanKind) -> Span = {
   let fresh_tid = rand_hex(16)!
   let sid = rand_hex(8)!
   let ts = now_ns(t)!
@@ -106,7 +114,7 @@ fn span_json(s: Span) -> Value = {
     ("traceId", json.from_string(s.trace_id)),
     ("spanId", json.from_string(s.span_id)),
     ("name", json.from_string(s.name)),
-    ("kind", json.from_int(s.kind)),
+    ("kind", json.from_int(kind_code(s.kind))),
     ("startTimeUnixNano", json.from_string(int.to_string(s.start_ns))),
     ("endTimeUnixNano", json.from_string(int.to_string(s.end_ns))),
     ("attributes", json.array(s.attrs |> list.map(attr_json))),

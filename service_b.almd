@@ -6,10 +6,10 @@ import self.otel
 
 effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
   let parent = otel.parse_traceparent(http.req_header(req, "traceparent") ?? "")
-  let span0 = otel.start_span(t, parent, "GET /inventory", otel.KIND_SERVER)!
+  let span0 = otel.start_span(t, parent, "GET /inventory", otel.Server)!
   let span = otel.with_attr(span0, "http.method", http.req_method(req))
 
-  let db0 = otel.start_span(t, some(otel.ctx(span)), "SELECT items", otel.KIND_INTERNAL)!
+  let db0 = otel.start_span(t, some(otel.ctx(span)), "SELECT items", otel.Internal)!
   process.sleep(25)  // simulated DB latency
   let db = otel.end_span(t, otel.with_attr(db0, "db.system", "sqlite"))!
 
