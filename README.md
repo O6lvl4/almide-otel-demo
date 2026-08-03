@@ -36,7 +36,7 @@ almide run service_a.almd   # terminal 2: checkout — prints the trace id
 
 Open http://localhost:16686, pick the `almide-checkout` service, and the waterfall is there.
 
-`minimal.almd` is the single-file starting point: one span, no SDK, the raw OTLP JSON shape.
+`minimal.almd` is the single-file starting point: one span, no SDK — the OTLP wire declared as Codec types that mirror it, so the derived encode is the whole exporter.
 
 ## Layout
 
@@ -54,6 +54,8 @@ Open http://localhost:16686, pick the `almide-checkout` service, and the waterfa
 **Propagation.** The client span serializes to `00-{trace_id}-{span_id}-01` and rides the request as a `traceparent` header. The server reads it back with `http.req_header(req, "traceparent")` and parents its span there. That single header is what joins the two processes into one trace.
 
 **Export.** One `POST` per batch to `http://localhost:4318/v1/traces`. A `{"partialSuccess":{}}` response means Jaeger accepted everything.
+
+**The wire is a type.** The OTLP document is declared as Codec types whose field names ARE the wire names (`traceId`, `startTimeUnixNano`), so the derived encode emits the document with no mapping layer. A `none` Option field omits its key — exactly proto3 "unset" — which is why a root span simply has no `parentSpanId`, and why `AnyValue` is a real proto3 oneof: an all-Option mirror type where exactly the alternative you construct hits the wire (almide v0.52.0's encode-omission law, [C-209](https://github.com/almide/almide/blob/main/docs/contracts/contracts.toml)).
 
 ## Provenance
 

@@ -1,9 +1,52 @@
-// Minimal single-file version: one span, no SDK — shows the raw
-// OTLP/HTTP JSON shape Jaeger accepts on localhost:4318.
+// Minimal single-file version: one span, no SDK. The OTLP/HTTP wire is
+// declared as Codec types that MIRROR it — field names ARE the wire names —
+// so the derived encode is the whole exporter. A none Option field omits its
+// key (proto3 "unset"): that is why a root span simply has no parentSpanId,
+// and why AnyValue below is a real proto3 oneof — construct exactly the
+// alternative you mean and exactly one key hits the wire.
 import json
 import http
 import random
 import process
+
+type AnyValue: Codec = {
+  stringValue: Option[String] = none,
+  intValue: Option[String] = none,    // proto3 JSON: int64 rides as string
+  boolValue: Option[Bool] = none,
+  doubleValue: Option[Float] = none,
+}
+
+type Attr: Codec = { key: String, value: AnyValue }
+
+type Status: Codec = { code: Int }
+
+type Span: Codec = {
+  traceId: String,
+  spanId: String,
+  parentSpanId: Option[String] = none,  // none = root: the key never hits the wire
+  name: String,
+  kind: Int,
+  startTimeUnixNano: String,
+  endTimeUnixNano: String,
+  attributes: List[Attr],
+  status: Status,
+}
+
+type Scope: Codec = { name: String, version: String }
+
+type ScopeSpans: Codec = { scope: Scope, spans: List[Span] }
+
+type Resource: Codec = { attributes: List[Attr] }
+
+type ResourceSpans: Codec = { resource: Resource, scopeSpans: List[ScopeSpans] }
+
+type Payload: Codec = { resourceSpans: List[ResourceSpans] }
+
+fn attr_str(key: String, val: String) -> Attr =
+  Attr { key: key, value: AnyValue { stringValue: some(val) } }
+
+fn attr_int(key: String, n: Int) -> Attr =
+  Attr { key: key, value: AnyValue { intValue: some(int.to_string(n)) } }
 
 effect fn rand_bytes(n: Int) -> List[Int] =
   if n == 0 then ([]: List[Int])
@@ -12,46 +55,9 @@ effect fn rand_bytes(n: Int) -> List[Int] =
 effect fn rand_hex(n_bytes: Int) -> String =
   rand_bytes(n_bytes)! |> bytes.from_list |> hex.encode
 
-fn attr_str(key: String, val: String) -> Value =
-  json.object([
-    ("key", json.from_string(key)),
-    ("value", json.object([("stringValue", json.from_string(val))])),
-  ])
-
-fn span_json(trace_id: String, span_id: String, name: String, start_ns: Int, end_ns: Int) -> Value =
-  json.object([
-    ("traceId", json.from_string(trace_id)),
-    ("spanId", json.from_string(span_id)),
-    ("name", json.from_string(name)),
-    ("kind", json.from_int(1)),
-    ("startTimeUnixNano", json.from_string(int.to_string(start_ns))),
-    ("endTimeUnixNano", json.from_string(int.to_string(end_ns))),
-    ("attributes", json.array([attr_str("language", "almide")])),
-    ("status", json.object([("code", json.from_int(1))])),
-  ])
-
-fn payload(service: String, span: Value) -> String = {
-  let resource = json.object([
-    ("attributes", json.array([attr_str("service.name", service)])),
-  ])
-  let scope = json.object([
-    ("name", json.from_string("almide-otel")),
-    ("version", json.from_string("0.1.0")),
-  ])
-  let scope_spans = json.object([
-    ("scope", scope),
-    ("spans", json.array([span])),
-  ])
-  let resource_spans = json.object([
-    ("resource", resource),
-    ("scopeSpans", json.array([scope_spans])),
-  ])
-  json.stringify(json.object([("resourceSpans", json.array([resource_spans]))]))
-}
-
 effect fn main() -> Unit = {
   // Anchor wall clock once, derive ns-precision timestamps from the monotonic clock
-  let anchor = datetime.now() * 1000000000 - datetime.monotonic_ns()
+  let anchor = datetime.now() * 1_000_000_000 - datetime.monotonic_ns()
 
   let trace_id = rand_hex(16)
   let span_id = rand_hex(8)
@@ -60,9 +66,25 @@ effect fn main() -> Unit = {
   process.sleep(42)
   let end_ns = anchor + datetime.monotonic_ns()
 
-  let body = payload("almide-spike", span_json(trace_id, span_id, "spike-root", start_ns, end_ns))
+  let doc = Payload { resourceSpans: [ResourceSpans {
+    resource: Resource { attributes: [attr_str("service.name", "almide-minimal")] },
+    scopeSpans: [ScopeSpans {
+      scope: Scope { name: "almide-otel", version: "0.1.0" },
+      spans: [Span {
+        traceId: trace_id,
+        spanId: span_id,
+        name: "minimal-root",
+        kind: 1,
+        startTimeUnixNano: int.to_string(start_ns),
+        endTimeUnixNano: int.to_string(end_ns),
+        attributes: [attr_str("language", "almide"), attr_int("answer", 42)],
+        status: Status { code: 1 },
+      }],
+    }],
+  }] }
+
   let headers = map.from_list([("Content-Type", "application/json")])
-  let resp = http.request("POST", "http://localhost:4318/v1/traces", body, headers)!
+  let resp = http.request("POST", "http://localhost:4318/v1/traces", json.stringify(Payload.encode(doc)), headers)!
   println("exporter response: ${resp}")
   println("trace_id: ${trace_id}")
 }

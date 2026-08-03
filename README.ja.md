@@ -36,7 +36,7 @@ almide run service_a.almd   # ターミナル2: checkout — trace idを出力
 
 http://localhost:16686 を開いて `almide-checkout` サービスを選ぶと、ウォーターフォールが表示されます。
 
-`minimal.almd` は1ファイルの出発点です：span 1本、SDKなし、生のOTLP JSONの形。
+`minimal.almd` は1ファイルの出発点です：span 1本、SDKなし——OTLPのワイヤをそれを鏡映するCodec型として宣言し、導出encodeがそのままexporterになります。
 
 ## 構成
 
@@ -54,6 +54,8 @@ http://localhost:16686 を開いて `almide-checkout` サービスを選ぶと�
 **伝播。** クライアントspanは `00-{trace_id}-{span_id}-01` にシリアライズされ、`traceparent` ヘッダとしてリクエストに乗ります。サーバ側は `http.req_header(req, "traceparent")` で読み戻し、そこに自分のspanをぶら下げます。この1本のヘッダが、2つのプロセスを1つのトレースに繋ぎます。
 
 **エクスポート。** バッチごとに `http://localhost:4318/v1/traces` へPOST 1回。レスポンスが `{"partialSuccess":{}}` なら全部受理されています。
+
+**ワイヤは型である。** OTLPドキュメントは、フィールド名がそのままワイヤ名（`traceId`、`startTimeUnixNano`）であるCodec型として宣言され、導出encodeが写像レイヤなしにドキュメントを出力します。`none`のOptionフィールドはキーごと省略——まさにproto3の"unset"——なので、rootのspanには`parentSpanId`がそもそも存在せず、`AnyValue`は本物のproto3 oneofになります：all-Optionのミラー型で、構築した選択肢だけがワイヤに乗る（almide v0.52.0のencode省略則、[C-209](https://github.com/almide/almide/blob/main/docs/contracts/contracts.toml)）。
 
 ## 経緯
 
