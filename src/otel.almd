@@ -32,7 +32,7 @@ type SpanCtx = { trace_id: String, span_id: String }
 type Span = {
   trace_id: String,
   span_id: String,
-  parent_span_id: String,  // "" = root
+  parent_span_id: Option[String],  // none = root
   name: String,
   kind: SpanKind,
   start_ns: Int,
@@ -60,7 +60,7 @@ effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: Spa
   let sid = rand_hex(8)!
   let ts = now_ns(t)!
   let tid = match parent { some(c) => c.trace_id, none => fresh_tid }
-  let pid = match parent { some(c) => c.span_id, none => "" }
+  let pid = match parent { some(c) => some(c.span_id), none => none }
   Span {
     trace_id: tid,
     span_id: sid,
@@ -101,15 +101,22 @@ fn parse_traceparent(h: String) -> Option[SpanCtx] = {
 // Wire-mirror record types: field names ARE the OTLP wire names, so the
 // derived Codec produces the document and the only hand-written logic is
 // the Span→wire transform (kind code, nanos-as-string per the proto3 JSON
-// mapping for fixed64, parentSpanId "" on roots).
+// mapping for fixed64). A none Option field OMITS its key — exactly proto3
+// "unset" — so parentSpanId on a root span and the AnyValue oneof both fall
+// out of the type shape with no special casing.
 
-type OtlpAttrValue: Codec = { stringValue: String }
+type OtlpAttrValue: Codec = {
+  stringValue: Option[String] = none,
+  intValue: Option[String] = none,    // proto3 JSON: int64 rides as string
+  boolValue: Option[Bool] = none,
+  doubleValue: Option[Float] = none,
+}
 type OtlpAttr: Codec = { key: String, value: OtlpAttrValue }
 type OtlpStatus: Codec = { code: Int }
 type OtlpSpan: Codec = {
   traceId: String,
   spanId: String,
-  parentSpanId: String,  // "" = root (proto3 default = unset; Jaeger 400s on null)
+  parentSpanId: Option[String] = none,  // none = root (key omitted, proto3 unset)
   name: String,
   kind: Int,
   startTimeUnixNano: String,
@@ -125,14 +132,14 @@ type OtlpPayload: Codec = { resourceSpans: List[OtlpResourceSpans] }
 
 fn attr(entry: (String, String)) -> OtlpAttr = {
   let (k, v) = entry
-  OtlpAttr { key: k, value: OtlpAttrValue { stringValue: v } }
+  OtlpAttr { key: k, value: OtlpAttrValue { stringValue: some(v) } }
 }
 
 fn span_wire(s: Span) -> OtlpSpan =
   OtlpSpan {
     traceId: s.trace_id,
     spanId: s.span_id,
-    parentSpanId: s.parent_span_id,
+    parentSpanId: s.parent_span_id,  // none stays none → key omitted on the wire
     name: s.name,
     kind: kind_code(s.kind),
     startTimeUnixNano: int.to_string(s.start_ns),

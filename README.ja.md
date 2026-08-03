@@ -19,10 +19,10 @@ almide-inventory   SELECT items     29.8ms         └─ DB作業のシミュ�
 
 ## 動かす
 
-必要なのはDockerと、v0.50.0より新しいalmideです — `service_b.almd` の型付き `HttpRequest` ハンドラは `develop` 上の修正バッチに依存していて、タグ付きリリースにはまだ入っていません。次のリリースまでは：
+必要なのはDockerと、v0.52.0以降のalmideです — ワイヤ型はv0.52.0のCodecセマンティクス（`none`フィールドはproto3流にキーごと省略。AnyValueのoneofもこれで表現）に依存しています：
 
 ```bash
-git clone https://github.com/almide/almide && cd almide && make install
+curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
 ```
 
 その後：

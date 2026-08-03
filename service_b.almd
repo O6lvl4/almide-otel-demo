@@ -1,8 +1,11 @@
 // Inventory service: extracts traceparent, records a server span
 // plus a simulated-DB child span, exports both to Jaeger.
 import http
+import json
 import process
 import self.otel
+
+type InventoryResp: Codec = { items: List[String], trace: String }
 
 effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
   let parent = otel.parse_traceparent(http.req_header(req, "traceparent") ?? "")
@@ -15,7 +18,10 @@ effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
 
   let done = otel.end_span(t, span)!
   let _ = otel.export(t, [done, db])!
-  "{\"items\": [\"potion\", \"elixir\"], \"trace\": \"${done.trace_id}\"}"
+  json.stringify(InventoryResp.encode(InventoryResp {
+    items: ["potion", "elixir"],
+    trace: done.trace_id,
+  }))
 }
 
 effect fn main() -> Unit = {

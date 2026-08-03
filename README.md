@@ -19,10 +19,10 @@ almide-inventory   SELECT items     29.8ms         └─ simulated DB work
 
 ## Run it
 
-You need Docker and an almide newer than v0.50.0 — the typed `HttpRequest` handler in `service_b.almd` relies on a fix batch that is on `develop` and not yet in a tagged release. Until the next release:
+You need Docker and almide v0.52.0 or newer — the wire types lean on the v0.52.0 Codec semantics (a `none` field omits its key, proto3-style, which is also what the AnyValue oneof rides on):
 
 ```bash
-git clone https://github.com/almide/almide && cd almide && make install
+curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
 ```
 
 Then:
