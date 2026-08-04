@@ -35,7 +35,7 @@ GET /inventory   otel.status_code        = ERROR
 
 ## 動かす
 
-必要なのはDockerと、**v0.53.1以降**のalmideです：
+必要なのはDockerと、**v0.53.2以降**のalmideです：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
@@ -59,14 +59,14 @@ http://localhost:16686 を開いて `almide-checkout` サービスを選ぶと�
 エンコーダは純粋関数なので、コレクタもソケットも時計もなしにワイヤを検証できます。Dockerは不要です：
 
 ```bash
-almide test          # 35件
+almide test          # 36件
 ```
 
 トレーシングSDKが静かに間違えがちなところを固定してあります：oneofの各armがキーを**ちょうど1つ**だけ出すこと、rootのspanには`parentSpanId`が**そもそも存在しない**こと、statusのmessageはerror armにしか現れないこと、壊れた`traceparent`は**修復せず拒否**すること、そしてOTLPドキュメント1件のバイト単位の一致。
 
 ## 構成
 
-SDKは4モジュール・166行で、**責務**で分けてあります。うち3つは純粋——時計もソケットも乱数も触りません——だからこそ35件中31件が単なる値の比較で済みます。
+SDKは4モジュール・166行で、**責務**で分けてあります。うち3つは純粋——時計もソケットも乱数も触りません——だからこそ36件中31件が単なる値の比較で済みます。
 
 ```
 span ← w3c
@@ -107,7 +107,7 @@ span ← otlp ← otel
 シグネチャはひとつの規則で決まります：**生成する**関数はtracerを先に取り、span を**変換する**関数はspanを先に取る。だからspanの一生はパイプ1本で書けて、最後に時計を刻む唯一の副作用ステップで終わります。
 
 ```almide
-let checkout = otel.root(t, "checkout", span.Internal)!
+let checkout = otel.root(t, "checkout")!
   |> span.attr("order.id", span.Str("A-1042"))
   |> span.attr("order.total", span.Double(38.5))
   |> span.succeed
@@ -122,17 +122,18 @@ let checkout = otel.root(t, "checkout", span.Internal)!
 
 最初の版を書いた過程でalmideコンパイラのバグが6件見つかり（[#1049–#1054](https://github.com/almide/almide/issues/1049)）、翌日までにすべて修正されました。`service_b.almd` の型付きハンドラシグネチャは、その修正バッチの産物です。
 
-モジュール分割の過程でさらに6件見つかり、[#1087–#1092](https://github.com/almide/almide/issues/1087) として登録しました。このリポジトリの形の大半は、その帰結です：
+モジュール分割の過程でさらに6件見つかり、[#1087–#1092](https://github.com/almide/almide/issues/1087) として登録しました。**6件とも v0.53.2 で修正済み**で、このリポジトリは回避策ではなく修正後のコンパイラに合わせて書いてあります：
 
-| issue | コードがこうなっている理由 |
+| かつての制約 | 今のコード |
 |---|---|
-| [#1087](https://github.com/almide/almide/issues/1087) | convention methodが型名（修飾なし）でキーされるため、`otlp` のspanミラーは `Span` ではなく `WireSpan`。またカスタム `fn T.repr` は他モジュールから**黙って無視される**ため、span kindの名前はただの関数 |
-| [#1088](https://github.com/almide/almide/issues/1088) | デフォルト引数が `import` を跨ぐと消えるため、公開関数は引数をすべて明示的に取る |
-| [#1089](https://github.com/almide/almide/issues/1089) | `json.encode` が `import` 越しには存在しないため、エンコードは `json.stringify(Type.encode(v))` |
-| [#1090](https://github.com/almide/almide/issues/1090) | `almide fmt` がレコード本体内のコメントを削除するため、このリポジトリでは fmt を使わない |
-| [#1091](https://github.com/almide/almide/issues/1091) | メソッドチェーンが複数行に跨れないため、チェーンはすべて `\|>` |
+| [#1087](https://github.com/almide/almide/issues/1087) convention methodがimport越しに到達不能 | `p.encode()`・`x.repr()`・`[T: Codec]` がすべて解決。`SpanKind` が `repr` をオーバーライドしているので `"${kind}"` はどのモジュールでも `client` を出す |
+| [#1088](https://github.com/almide/almide/issues/1088) デフォルト引数がexport署名から落ちる | `otel.tracer("almide-checkout")` と `otel.root(t, "checkout")` がデフォルトを受け取る |
+| [#1089](https://github.com/almide/almide/issues/1089) `json.encode` がimport越しに存在しない | エンコードはどこでも1呼び出し |
+| [#1090](https://github.com/almide/almide/issues/1090) `almide fmt` がレコード内コメントを削除 | フィールドのコメントがformatを生き延びる |
+| [#1091](https://github.com/almide/almide/issues/1091) 複数行メソッドチェーンが構文エラー | チェーンはここでは読みやすい `\|>` のままだが、両形式とも動く |
+| [#1092](https://github.com/almide/almide/issues/1092) コンパイルできないドキュメント例 | — |
 
-挙動が変わりうるのは #1087 のrepr（しかも宣言モジュールの外だけ）のみで、あとは正しさではなく形の問題です——「若い言語で書く」というのは正直に言えばそういうことです。
+未解決の形がひとつだけ残っていて、効いている箇所にはコードにそう書いてあります：`otlp` のspanミラーが `Span` ではなく `WireSpan` なのは、ドメイン側のモジュール名が `span` で型名が `Span` だからです——両方をbareで綴ると、あのファイル内の参照が誤った方に解決されます（[#1093](https://github.com/almide/almide/issues/1093)、[#1094](https://github.com/almide/almide/issues/1094)）。OTLPミラーの他の型はワイヤ本来の名前のままです。
 
 ## ライセンス
 

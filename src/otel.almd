@@ -29,7 +29,7 @@ type Tracer = {
   anchor: Int,
 }
 
-effect fn tracer(service: String, endpoint: String) -> Tracer =
+effect fn tracer(service: String, endpoint: String = OTLP_HTTP_JSON) -> Tracer =
   Tracer {
     service: service,
     endpoint: endpoint,
@@ -61,8 +61,9 @@ effect fn start(t: Tracer, name: String, kind: span.SpanKind, parent: Option[spa
     status: span.Unset,
   }
 
-// Opens a new trace.
-effect fn root(t: Tracer, name: String, kind: span.SpanKind) -> span.Span =
+// Opens a new trace. `kind` defaults to Internal — what a root span in a
+// one-shot program almost always is.
+effect fn root(t: Tracer, name: String, kind: span.SpanKind = span.Internal) -> span.Span =
   start(t, name, kind, none)!
 
 // Continues the caller's trace. Taking a SpanCtx rather than an Option is
@@ -88,7 +89,15 @@ test "ids are the widths OTLP requires" {
   let t = tracer("svc", "")!
   assert_eq(string.len(rand_hex(16)!), 32)  // trace id: 16 bytes
   assert_eq(string.len(rand_hex(8)!), 16)   // span id:   8 bytes
-  assert_eq(string.len(root(t, "n", span.Internal)!.trace_id), 32)
+  assert_eq(string.len(root(t, "n")!.trace_id), 32)
+}
+
+// The defaulted parameters are part of the surface, so they are exercised:
+// `tracer` without an endpoint and `root` without a kind.
+test "the defaults are the common case" {
+  let t = tracer("svc")!
+  assert_eq(t.endpoint, OTLP_HTTP_JSON)
+  assert_eq("${root(t, "n")!.kind}", "internal")
 }
 
 test "a root opens a trace; a child continues it" {

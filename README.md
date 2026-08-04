@@ -35,7 +35,7 @@ GET /inventory   otel.status_code        = ERROR
 
 ## Run it
 
-You need Docker and almide **v0.53.1 or newer**:
+You need Docker and almide **v0.53.2 or newer**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
@@ -59,14 +59,14 @@ Open http://localhost:16686, pick the `almide-checkout` service, and the waterfa
 The encoder is a pure function, so the wire is asserted without a collector, a socket, or a clock. No Docker needed:
 
 ```bash
-almide test          # 35 tests
+almide test          # 36 tests
 ```
 
 They pin the things a tracing SDK gets quietly wrong: that each oneof arm emits exactly one key, that a root span has no `parentSpanId` at all, that a status message appears only on the error arm, that a malformed `traceparent` is rejected rather than repaired, and one golden OTLP document byte for byte.
 
 ## Layout
 
-The SDK is 166 lines across four modules, split by what each one is *responsible for*. Three of them are pure — no clock, no socket, no randomness — which is exactly why 31 of the 35 tests are plain value comparisons.
+The SDK is 166 lines across four modules, split by what each one is *responsible for*. Three of them are pure — no clock, no socket, no randomness — which is exactly why 31 of the 36 tests are plain value comparisons.
 
 ```
 span ← w3c
@@ -107,7 +107,7 @@ A service imports `otel` for the tracer, `span` for the span's verbs, and `w3c` 
 One rule decides every signature: a function that **creates** takes the tracer first, a function that **transforms** a span takes the span first. So a span's whole life story is one pipe chain, ending in the single effectful step that stamps the clock.
 
 ```almide
-let checkout = otel.root(t, "checkout", span.Internal)!
+let checkout = otel.root(t, "checkout")!
   |> span.attr("order.id", span.Str("A-1042"))
   |> span.attr("order.total", span.Double(38.5))
   |> span.succeed
@@ -122,17 +122,18 @@ The module prefixes in that chain are not noise — they say which layer each st
 
 Writing the first version surfaced six almide compiler bugs ([#1049–#1054](https://github.com/almide/almide/issues/1049)), all fixed within a day. The typed handler signature in `service_b.almd` exists because of that batch.
 
-Splitting it into modules surfaced six more, filed as [#1087–#1092](https://github.com/almide/almide/issues/1087). Most of this repo's shape is a consequence of them:
+Splitting it into modules surfaced six more, filed as [#1087–#1092](https://github.com/almide/almide/issues/1087). **All six are fixed in v0.53.2**, and this repo is written against the fixed compiler rather than around it:
 
-| filed | why the code looks like this |
+| was | the code now |
 |---|---|
-| [#1087](https://github.com/almide/almide/issues/1087) | convention methods are keyed by bare type name, so `otlp`'s span mirror is `WireSpan` rather than `Span`; and a custom `fn T.repr` is silently ignored across an import, so the span-kind name is an ordinary function |
-| [#1088](https://github.com/almide/almide/issues/1088) | default arguments vanish across an import, so every public function takes all its arguments explicitly |
-| [#1089](https://github.com/almide/almide/issues/1089) | `json.encode` does not exist across an import, so encoding is `json.stringify(Type.encode(v))` |
-| [#1090](https://github.com/almide/almide/issues/1090) | `almide fmt` deletes comments inside record bodies, so it is not run on this repo |
-| [#1091](https://github.com/almide/almide/issues/1091) | multi-line method chains do not parse, so every chain is `\|>` |
+| [#1087](https://github.com/almide/almide/issues/1087) convention methods unreachable across an import | `p.encode()`, `x.repr()` and a `[T: Codec]` bound all resolve; `SpanKind` overrides `repr`, so `"${kind}"` prints `client` in any module |
+| [#1088](https://github.com/almide/almide/issues/1088) default arguments dropped from an exported signature | `otel.tracer("almide-checkout")` and `otel.root(t, "checkout")` take their defaults |
+| [#1089](https://github.com/almide/almide/issues/1089) `json.encode` missing across an import | encoding is one call, everywhere |
+| [#1090](https://github.com/almide/almide/issues/1090) `almide fmt` deleted comments inside record bodies | field comments survive a format |
+| [#1091](https://github.com/almide/almide/issues/1091) multi-line method chains did not parse | chains stay `\|>`, which reads better here, but both forms work |
+| [#1092](https://github.com/almide/almide/issues/1092) a docs example that could not compile | — |
 
-Only #1087's repr case can change behaviour, and only outside the module that declares it. The rest are shape, not correctness — which is the honest version of "written in a young language."
+One shape is still open, and the code says so where it bites: `otlp`'s span mirror is `WireSpan`, not `Span`, because the domain module is itself called `span` and its type is `Span` — with both spelled bare, a reference inside that file still resolves to the wrong one ([#1093](https://github.com/almide/almide/issues/1093), [#1094](https://github.com/almide/almide/issues/1094)). Everything else in the OTLP mirror keeps the wire's own names.
 
 ## License
 

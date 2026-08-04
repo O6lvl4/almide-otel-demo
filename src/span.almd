@@ -35,12 +35,11 @@ type Span = {
   status: SpanStatus,
 }
 
-// The spelling Jaeger shows. A `fn SpanKind.repr` override would be the
-// idiomatic way to get this into `"${kind}"`, but a custom repr does not
-// resolve across a module boundary in 0.53.1 — interpolation silently falls
-// back to the variant name — so the name is an ordinary function that says
-// what it does everywhere.
-fn kind_name(k: SpanKind) -> String = match k {
+// The spelling Jaeger shows. Overriding `repr` rather than writing a named
+// helper is what puts it inside `"${kind}"` — interpolation calls repr on any
+// value, so no to_string dance is needed at any call site, in this module or
+// another one.
+fn SpanKind.repr(k: SpanKind) -> String = match k {
   Internal => "internal",
   Server   => "server",
   Client   => "client",
@@ -70,14 +69,14 @@ fn fixture() -> Span =
     kind: Internal, start_ns: 0, end_ns: 0, attrs: [], status: Unset,
   }
 
-test "every span kind has a name" where [
+test "every span kind renders as the spelling Jaeger shows" where [
   "internal" [k = Internal, want = "internal"],
   "server"   [k = Server,   want = "server"],
   "client"   [k = Client,   want = "client"],
   "producer" [k = Producer, want = "producer"],
   "consumer" [k = Consumer, want = "consumer"],
 ] {
-  assert_eq(kind_name(k), want)
+  assert_eq("${k}", want)
 }
 
 test "the builder chain records attributes in order" {

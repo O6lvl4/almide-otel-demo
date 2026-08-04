@@ -23,11 +23,10 @@ type AnyValue: Codec = {
 }
 type KeyValue: Codec = { key: String, value: AnyValue }
 type Status: Codec = { code: Int, message: Option[String] = none }
-// The proto message is just `Span`, but a type name has to be unique across
-// the whole package in 0.53.1 — module qualification does not isolate the
-// namespace, and a duplicate silently binds to the other module's type. So
-// this one mirror deviates from the wire name; the FIELD names, which are
-// what the derive actually emits, do not.
+// The proto message is just `Span`. This mirror is `WireSpan` because the
+// domain module is itself called `span` and its type is `Span`: with both
+// spelled bare, a reference inside this file resolves to the wrong one. The
+// FIELD names — which are what the derive actually emits — are untouched.
 type WireSpan: Codec = {
   traceId: String,
   spanId: String,
@@ -107,16 +106,14 @@ fn document(service: String, spans: List[span.Span]) -> Payload =
 
 // The entire exporter minus the socket.
 fn payload(service: String, spans: List[span.Span]) -> String =
-  json.stringify(Payload.encode(document(service, spans)))
+  json.encode(document(service, spans))
 
 // ── Tests ───────────────────────────────────────────────────────────────
-// Encoding one message is `stringify` over the derived `encode`.
-// (`json.encode(x)` folds those into one call, but in 0.53.1 it does not
-// resolve across a module boundary, so the two steps stay explicit.)
+// `json.encode(x)` IS `stringify` over the derived `encode`, in one call.
 
-fn attr_json(v: span.AttrValue) -> String = json.stringify(AnyValue.encode(any_value(v)))
-fn status_json(s: span.SpanStatus) -> String = json.stringify(Status.encode(status_wire(s)))
-fn span_json(s: span.Span) -> String = json.stringify(WireSpan.encode(span_wire(s)))
+fn attr_json(v: span.AttrValue) -> String = json.encode(any_value(v))
+fn status_json(s: span.SpanStatus) -> String = json.encode(status_wire(s))
+fn span_json(s: span.Span) -> String = json.encode(span_wire(s))
 
 fn fixture() -> span.Span =
   span.Span {

@@ -88,7 +88,7 @@ effect fn main() -> Unit = {
   process.sleep(42)
   let end_ns = anchor + datetime.monotonic_ns()
 
-  let body = json.stringify(Payload.encode(document(trace_id, span_id, start_ns, end_ns)))
+  let body = json.encode(document(trace_id, span_id, start_ns, end_ns))
   let resp = http.request("POST", COLLECTOR, body, ["Content-Type": "application/json"])!
   println("exporter response: ${resp}")
   println("trace_id: ${trace_id}")
@@ -98,7 +98,7 @@ effect fn main() -> Unit = {
 // document is a pure function of four values, so the wire can be asserted
 // without a collector, a socket, or a clock.
 test "the root span omits parentSpanId and each attribute emits one key" {
-  let wire = json.stringify(Payload.encode(document("aa", "bb", 10, 52)))
+  let wire = json.encode(document("aa", "bb", 10, 52))
   assert(not string.contains(wire, "parentSpanId"))
   assert(string.contains(wire, '{"key":"language","value":{"stringValue":"almide"}}'))
   assert(string.contains(wire, '{"key":"answer","value":{"intValue":"42"}}'))

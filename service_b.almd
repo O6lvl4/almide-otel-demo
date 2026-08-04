@@ -35,14 +35,11 @@ effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
   let inbound_done = inbound |> span.succeed |> otel.finish(t)!
   let _ = otel.export(t, [inbound_done, db_done])!
 
-  json.stringify(InventoryResp.encode(InventoryResp {
-    items: ITEMS,
-    trace: inbound_done.trace_id,
-  }))
+  json.encode(InventoryResp { items: ITEMS, trace: inbound_done.trace_id })
 }
 
 effect fn main() -> Unit = {
-  let t = otel.tracer("almide-inventory", otel.OTLP_HTTP_JSON)!
+  let t = otel.tracer("almide-inventory")!
   println("inventory service listening on http://localhost:${PORT}")
   // `!` cannot cross a closure boundary, so the handler's Result is matched
   // here rather than propagated — which is what turns a handler failure
@@ -50,6 +47,6 @@ effect fn main() -> Unit = {
   http.serve(PORT, (req) =>
     match handle(t, req) {
       ok(body) => http.json(200, body),
-      err(e) => http.json(500, json.stringify(ErrorResp.encode(ErrorResp { error: e }))),
+      err(e) => http.json(500, json.encode(ErrorResp { error: e })),
     })
 }

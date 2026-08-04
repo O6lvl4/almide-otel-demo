@@ -13,11 +13,12 @@ import self.w3c
 let INVENTORY = "http://localhost:7002/inventory"
 
 effect fn main() -> Unit = {
-  let t = otel.tracer("almide-checkout", otel.OTLP_HTTP_JSON)!
+  let t = otel.tracer("almide-checkout")!
 
-  // All four AnyValue arms appear here, and each lands on the wire as its
-  // own proto3 type rather than as a stringified everything.
-  let checkout = otel.root(t, "checkout", span.Internal)!
+  // No kind: a root span is Internal, which is the parameter default. All
+  // four AnyValue arms appear here, and each lands on the wire as its own
+  // proto3 type rather than as a stringified everything.
+  let checkout = otel.root(t, "checkout")!
     |> span.attr("order.id", span.Str("A-1042"))
     |> span.attr("order.items", span.Int64(2))
     |> span.attr("order.total", span.Double(38.5))
