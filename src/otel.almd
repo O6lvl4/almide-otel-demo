@@ -1,29 +1,62 @@
-// Minimal OpenTelemetry tracing SDK for Almide.
+// A minimal OpenTelemetry tracing SDK for Almide.
 // Traces only. Export: OTLP/HTTP + JSON (proto3 JSON mapping).
 // Context propagation: W3C Trace Context (traceparent header).
+//
+// The shape of this file is the point: three closed sum types hold every
+// choice OTLP offers, a record mirrors every wire message, and the bridge
+// between them is one `match` per type — nothing else. The whole encoder is
+// pure, so the tests at the bottom assert real wire bytes with no collector
+// and no network.
 import json
 import http
 import random
+import hex
 
-// The five OTLP span kinds. `kind_code` maps to the wire enum —
-// the full matrix, matching opentelemetry-proto's SpanKind.
+let OTLP_HTTP_JSON = "http://localhost:4318/v1/traces"
+
+// ── The domain ──────────────────────────────────────────────────────────
+// Each type below is a COMPLETE matrix of what the protocol allows, so an
+// unrepresentable state is unwritable rather than merely undocumented.
+
+// The five OTLP span kinds. `repr` gives the spelling Jaeger shows, so
+// `"${kind}"` prints `client` in any diagnostic — interpolation calls repr
+// on any value, so no to_string dance is needed at the call sites.
 type SpanKind = Internal | Server | Client | Producer | Consumer
 
-fn kind_code(k: SpanKind) -> Int =
-  match k {
-    Internal => 1,
-    Server   => 2,
-    Client   => 3,
-    Producer => 4,
-    Consumer => 5,
-  }
+fn SpanKind.repr(k: SpanKind) -> String = match k {
+  Internal => "internal",
+  Server   => "server",
+  Client   => "client",
+  Producer => "producer",
+  Consumer => "consumer",
+}
+
+fn kind_code(k: SpanKind) -> Int = match k {
+  Internal => 1,
+  Server   => 2,
+  Client   => 3,
+  Producer => 4,
+  Consumer => 5,
+}
+
+// proto3 `AnyValue` is a oneof. Here it is a sum type: exactly one arm
+// exists by construction. On the wire it becomes an all-Option mirror
+// record where exactly one key survives. `any_value` below is the entire
+// bridge — the oneof discipline is the match, not a runtime check.
+type AttrValue = Str(String) | Int64(Int) | Bool(Bool) | Double(Float)
+
+// proto3 `StatusCode`, all three cells. Only the error arm carries a
+// message, which is exactly what the protocol says: `message` is meaningful
+// only when code = 2. (`Ok` is a reserved token in Almide, hence
+// Success/Failure for the OTel names OK/ERROR.)
+type SpanStatus = Unset | Success | Failure(String)
 
 type Tracer = {
   service: String,
   endpoint: String,
-  // wall-clock ns at monotonic zero: anchor once, derive all span
-  // timestamps from the monotonic clock (same trick as real SDKs —
-  // datetime.now() is second-precision, monotonic_ns() fills the gap)
+  // Wall-clock ns at monotonic zero. Anchor once, then derive every span
+  // timestamp from the monotonic clock — datetime.now() is second-precision
+  // and monotonic_ns() fills the gap. Production OTel SDKs do the same.
   anchor: Int,
 }
 
@@ -37,13 +70,28 @@ type Span = {
   kind: SpanKind,
   start_ns: Int,
   end_ns: Int,
-  attrs: List[(String, String)],
+  attrs: List[(String, AttrValue)],
+  status: SpanStatus,
 }
 
-effect fn tracer(service: String, endpoint: String) -> Tracer = {
-  let anchor = datetime.now() * 1_000_000_000 - datetime.monotonic_ns()
-  Tracer { service: service, endpoint: endpoint, anchor: anchor }
-}
+// ── Recording ───────────────────────────────────────────────────────────
+// One rule decides every signature: a function that CREATES takes the
+// tracer first, a function that TRANSFORMS a span takes the span first.
+// So everything after `root`/`child` composes with `|>` into a single chain
+// that reads top-to-bottom as the span's life story, ending in the one
+// effectful step that stamps the clock.
+//
+//   otel.root(t, "checkout", otel.Internal)!
+//     |> otel.attr("order.id", otel.Str("A-1042"))
+//     |> otel.succeed
+//     |> otel.finish(t)!
+
+effect fn tracer(service: String, endpoint: String) -> Tracer =
+  Tracer {
+    service: service,
+    endpoint: endpoint,
+    anchor: datetime.now() * 1_000_000_000 - datetime.monotonic_ns(),
+  }
 
 effect fn rand_hex(n_bytes: Int) -> String =
   list.range(0, n_bytes)
@@ -53,73 +101,90 @@ effect fn rand_hex(n_bytes: Int) -> String =
 
 effect fn now_ns(t: Tracer) -> Int = t.anchor + datetime.monotonic_ns()
 
-// parent = none → new root span (fresh trace_id)
-// parent = some(ctx) → child span in the same trace
-effect fn start_span(t: Tracer, parent: Option[SpanCtx], name: String, kind: SpanKind) -> Span = {
-  let fresh_tid = rand_hex(16)!
-  let sid = rand_hex(8)!
-  let ts = now_ns(t)!
-  let tid = match parent { some(c) => c.trace_id, none => fresh_tid }
-  let pid = match parent { some(c) => some(c.span_id), none => none }
+// `parent: none` opens a new trace; `parent: some(ctx)` continues one. The
+// Option is the whole difference between the two, so it stays here and the
+// two public entry points below spell it out by name instead of making
+// every call site write `none`.
+effect fn start(t: Tracer, name: String, kind: SpanKind, parent: Option[SpanCtx]) -> Span =
   Span {
-    trace_id: tid,
-    span_id: sid,
-    parent_span_id: pid,
+    trace_id: match parent { some(c) => c.trace_id, none => rand_hex(16)! },
+    span_id: rand_hex(8)!,
+    parent_span_id: match parent { some(c) => some(c.span_id), none => none },
     name: name,
     kind: kind,
-    start_ns: ts,
+    start_ns: now_ns(t)!,
     end_ns: 0,
     attrs: [],
+    status: Unset,
   }
-}
 
-effect fn end_span(t: Tracer, s: Span) -> Span = {
-  let ts = now_ns(t)!
-  { ...s, end_ns: ts }
-}
+// Opens a new trace.
+effect fn root(t: Tracer, name: String, kind: SpanKind) -> Span =
+  start(t, name, kind, none)!
 
-fn with_attr(s: Span, key: String, val: String) -> Span =
-  { ...s, attrs: s.attrs + [(key, val)] }
+// Continues the caller's trace. Taking a SpanCtx rather than an Option is
+// the point: a child without a parent is unwritable.
+effect fn child(t: Tracer, parent: SpanCtx, name: String, kind: SpanKind) -> Span =
+  start(t, name, kind, some(parent))!
 
-fn ctx(s: Span) -> SpanCtx =
-  SpanCtx { trace_id: s.trace_id, span_id: s.span_id }
+effect fn finish(s: Span, t: Tracer) -> Span = { ...s, end_ns: now_ns(t)! }
 
-// ── W3C Trace Context ──
+fn attr(s: Span, key: String, v: AttrValue) -> Span =
+  { ...s, attrs: s.attrs + [(key, v)] }
 
-fn traceparent(s: Span) -> String = "00-${s.trace_id}-${s.span_id}-01"
+fn succeed(s: Span) -> Span = { ...s, status: Success }
 
+fn fail(s: Span, msg: String) -> Span = { ...s, status: Failure(msg) }
+
+fn ctx(s: Span) -> SpanCtx = SpanCtx { trace_id: s.trace_id, span_id: s.span_id }
+
+// ── W3C Trace Context ───────────────────────────────────────────────────
+
+let HEX_DIGITS = "0123456789abcdef"
+let SAMPLED = "01"
+
+fn is_hex(s: String) -> Bool =
+  string.chars(s) |> list.all((c) => string.contains(HEX_DIGITS, c))
+
+fn traceparent(c: SpanCtx) -> String = "00-${c.trace_id}-${c.span_id}-${SAMPLED}"
+
+// A malformed header must start a NEW trace rather than corrupt the
+// caller's, so every check below rejects instead of repairing. The all-zero
+// ids are the W3C recommendation's own "invalid" sentinels.
 fn parse_traceparent(h: String) -> Option[SpanCtx] = {
   let parts = string.split(h, "-")
-  let tid = list.get(parts, 1) ?? ""
-  let sid = list.get(parts, 2) ?? ""
-  if list.len(parts) == 4 and string.len(tid) == 32 and string.len(sid) == 16
-  then some(SpanCtx { trace_id: tid, span_id: sid })
-  else none
+  guard list.len(parts) == 4 else none
+  let version = list.get_or(parts, 0, "")
+  let tid = list.get_or(parts, 1, "")
+  let sid = list.get_or(parts, 2, "")
+  guard version == "00" else none
+  guard string.len(tid) == 32 and is_hex(tid) and tid != string.repeat("0", 32) else none
+  guard string.len(sid) == 16 and is_hex(sid) and sid != string.repeat("0", 16) else none
+  some(SpanCtx { trace_id: tid, span_id: sid })
 }
 
-// ── OTLP/HTTP JSON encoding ──
-// Wire-mirror record types: field names ARE the OTLP wire names, so the
-// derived Codec produces the document and the only hand-written logic is
-// the Span→wire transform (kind code, nanos-as-string per the proto3 JSON
-// mapping for fixed64). A none Option field OMITS its key — exactly proto3
-// "unset" — so parentSpanId on a root span and the AnyValue oneof both fall
-// out of the type shape with no special casing.
+// ── The wire ────────────────────────────────────────────────────────────
+// These records MIRROR opentelemetry-proto: every field name is the wire
+// name, so the derived Codec emits the document and no mapping layer
+// exists. A `none` Option field omits its key — exactly proto3 "unset" —
+// which is why a root span simply has no parentSpanId, and why AnyValue is
+// a real oneof instead of four nullable columns.
 
-type OtlpAttrValue: Codec = {
+type OtlpAnyValue: Codec = {
   stringValue: Option[String] = none,
-  intValue: Option[String] = none,    // proto3 JSON: int64 rides as string
+  intValue: Option[String] = none,    // proto3 JSON: int64 rides as a string
   boolValue: Option[Bool] = none,
   doubleValue: Option[Float] = none,
 }
-type OtlpAttr: Codec = { key: String, value: OtlpAttrValue }
-type OtlpStatus: Codec = { code: Int }
+type OtlpAttr: Codec = { key: String, value: OtlpAnyValue }
+type OtlpStatus: Codec = { code: Int, message: Option[String] = none }
 type OtlpSpan: Codec = {
   traceId: String,
   spanId: String,
-  parentSpanId: Option[String] = none,  // none = root (key omitted, proto3 unset)
+  parentSpanId: Option[String] = none,
   name: String,
   kind: Int,
-  startTimeUnixNano: String,
+  startTimeUnixNano: String,          // fixed64 also rides as a string
   endTimeUnixNano: String,
   attributes: List[OtlpAttr],
   status: OtlpStatus,
@@ -130,30 +195,55 @@ type OtlpResource: Codec = { attributes: List[OtlpAttr] }
 type OtlpResourceSpans: Codec = { resource: OtlpResource, scopeSpans: List[OtlpScopeSpans] }
 type OtlpPayload: Codec = { resourceSpans: List[OtlpResourceSpans] }
 
-fn attr(entry: (String, String)) -> OtlpAttr = {
+// The oneof bridge. One arm in, one key out.
+fn any_value(v: AttrValue) -> OtlpAnyValue = match v {
+  Str(s)    => OtlpAnyValue { stringValue: some(s) },
+  Int64(n)  => OtlpAnyValue { intValue: some(int.to_string(n)) },
+  Bool(b)   => OtlpAnyValue { boolValue: some(b) },
+  Double(f) => OtlpAnyValue { doubleValue: some(f) },
+}
+
+fn status_wire(s: SpanStatus) -> OtlpStatus = match s {
+  Unset      => OtlpStatus { code: 0 },
+  Success    => OtlpStatus { code: 1 },
+  Failure(m) => OtlpStatus { code: 2, message: some(m) },
+}
+
+fn attr_wire(entry: (String, AttrValue)) -> OtlpAttr = {
   let (k, v) = entry
-  OtlpAttr { key: k, value: OtlpAttrValue { stringValue: some(v) } }
+  OtlpAttr { key: k, value: any_value(v) }
 }
 
 fn span_wire(s: Span) -> OtlpSpan =
   OtlpSpan {
     traceId: s.trace_id,
     spanId: s.span_id,
-    parentSpanId: s.parent_span_id,  // none stays none → key omitted on the wire
+    parentSpanId: s.parent_span_id,   // none stays none → key omitted
     name: s.name,
     kind: kind_code(s.kind),
     startTimeUnixNano: int.to_string(s.start_ns),
     endTimeUnixNano: int.to_string(s.end_ns),
-    attributes: s.attrs |> list.map(attr),
-    status: OtlpStatus { code: 1 },
+    attributes: s.attrs |> list.map(attr_wire),
+    status: status_wire(s.status),
   }
 
+// Encoding one wire message is `stringify` over the derived `encode`.
+// (`json.encode(x)` folds those into one call, but in 0.53.1 it does not
+// resolve across a module boundary, so the two steps stay explicit.)
+fn attr_json(v: AttrValue) -> String = json.stringify(OtlpAnyValue.encode(any_value(v)))
+fn status_json(s: SpanStatus) -> String = json.stringify(OtlpStatus.encode(status_wire(s)))
+fn span_json(s: Span) -> String = json.stringify(OtlpSpan.encode(span_wire(s)))
+
+// Pure: the entire exporter minus the socket. This is what the tests pin,
+// and it is why they need no collector.
 fn payload(t: Tracer, spans: List[Span]) -> String = {
   let doc = OtlpPayload {
     resourceSpans: [OtlpResourceSpans {
-      resource: OtlpResource { attributes: [attr(("service.name", t.service))] },
+      resource: OtlpResource {
+        attributes: [attr_wire(("service.name", Str(t.service)))],
+      },
       scopeSpans: [OtlpScopeSpans {
-        scope: OtlpScope { name: "almide-otel", version: "0.1.0" },
+        scope: OtlpScope { name: "almide-otel", version: "0.2.0" },
         spans: spans |> list.map(span_wire),
       }],
     }],
@@ -161,9 +251,103 @@ fn payload(t: Tracer, spans: List[Span]) -> String = {
   json.stringify(OtlpPayload.encode(doc))
 }
 
-// Returns the collector's response body ({"partialSuccess":{}} = accepted)
-effect fn export(t: Tracer, spans: List[Span]) -> String = {
-  let headers = map.from_list([("Content-Type", "application/json")])
-  let resp = http.request("POST", t.endpoint, payload(t, spans), headers)!
-  resp
+// Returns the collector's response body ({"partialSuccess":{}} = accepted).
+effect fn export(t: Tracer, spans: List[Span]) -> String =
+  http.request("POST", t.endpoint, payload(t, spans), ["Content-Type": "application/json"])!
+
+// ── Tests ───────────────────────────────────────────────────────────────
+// The encoder is pure, so every wire promise below is checked against real
+// bytes with no collector, no socket, and no clock.
+
+test "span kinds cover the OTLP enum" where [
+  "internal" [k = Internal, code = 1, shown = "internal"],
+  "server"   [k = Server,   code = 2, shown = "server"],
+  "client"   [k = Client,   code = 3, shown = "client"],
+  "producer" [k = Producer, code = 4, shown = "producer"],
+  "consumer" [k = Consumer, code = 5, shown = "consumer"],
+] {
+  assert_eq(kind_code(k), code)
+  assert_eq("${k}", shown)
+}
+
+test "AnyValue is a oneof: exactly one key reaches the wire" where [
+  "string" [v = Str("almide"), want = '{"stringValue":"almide"}'],
+  "int64"  [v = Int64(42),     want = '{"intValue":"42"}'],
+  "bool"   [v = Bool(true),    want = '{"boolValue":true}'],
+  "double" [v = Double(1.5),   want = '{"doubleValue":1.5}'],
+] {
+  assert_eq(attr_json(v), want)
+}
+
+test "status carries a message only on the error arm" where [
+  "unset" [s = Unset,           want = '{"code":0}'],
+  "ok"    [s = Success,         want = '{"code":1}'],
+  "error" [s = Failure("boom"), want = '{"code":2,"message":"boom"}'],
+] {
+  assert_eq(status_json(s), want)
+}
+
+// Emitting `null` here would be a DIFFERENT document: proto3 "unset" is an
+// absent key, and a collector is entitled to reject the null.
+test "a root span omits parentSpanId; a child emits it" {
+  let root = Span {
+    trace_id: "t", span_id: "s", parent_span_id: none, name: "n",
+    kind: Internal, start_ns: 1, end_ns: 2, attrs: [], status: Success,
+  }
+  assert(not string.contains(span_json(root), "parentSpanId"))
+  let child = { ...root, parent_span_id: some("p") }
+  assert(string.contains(span_json(child), '"parentSpanId":"p"'))
+}
+
+test "traceparent round-trips through the header" {
+  let c = SpanCtx {
+    trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    span_id: "00f067aa0ba902b7",
+  }
+  assert_eq(traceparent(c), "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+  assert_eq(parse_traceparent(traceparent(c)), some(c))
+}
+
+// Each row is a MUST from the W3C recommendation.
+test "a malformed traceparent is rejected, not repaired" where [
+  "empty"       [h = ""],
+  "too few"     [h = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"],
+  "bad version" [h = "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"],
+  "short trace" [h = "00-4bf92f3577b34da6-00f067aa0ba902b7-01"],
+  "non hex"     [h = "00-4bf92f3577b34da6a3ce929d0e0e47zz-00f067aa0ba902b7-01"],
+  "zero trace"  [h = "00-00000000000000000000000000000000-00f067aa0ba902b7-01"],
+  "zero span"   [h = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"],
+] {
+  assert_eq(parse_traceparent(h), none)
+}
+
+// The one golden document: resource, scope, and an attributed span.
+test "the payload is the OTLP document, byte for byte" {
+  let t = Tracer { service: "svc", endpoint: "", anchor: 0 }
+  let s = Span {
+    trace_id: "aa", span_id: "bb", parent_span_id: none, name: "op",
+    kind: Client, start_ns: 10, end_ns: 20, attrs: [], status: Success,
+  } |> attr("k", Str("v"))
+  assert_eq(
+    payload(t, [s]),
+    '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name",'
+      + '"value":{"stringValue":"svc"}}]},"scopeSpans":[{"scope":'
+      + '{"name":"almide-otel","version":"0.2.0"},"spans":[{"traceId":"aa",'
+      + '"spanId":"bb","name":"op","kind":3,"startTimeUnixNano":"10",'
+      + '"endTimeUnixNano":"20","attributes":[{"key":"k","value":'
+      + '{"stringValue":"v"}}],"status":{"code":1}}]}]}]}',
+  )
+}
+
+test "the builder chain records attributes in order" {
+  let s = Span {
+    trace_id: "t", span_id: "s", parent_span_id: none, name: "n",
+    kind: Internal, start_ns: 0, end_ns: 0, attrs: [], status: Unset,
+  }
+    |> attr("a", Int64(1))
+    |> attr("b", Bool(false))
+    |> fail("nope")
+  assert_eq(list.len(s.attrs), 2)
+  assert_eq(s.status, Failure("nope"))
+  assert_eq(status_json(s.status), '{"code":2,"message":"nope"}')
 }

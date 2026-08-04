@@ -1,75 +1,64 @@
-// Minimal single-file version: one span, no SDK. The OTLP/HTTP wire is
-// declared as Codec types that MIRROR it — field names ARE the wire names —
-// so the derived encode is the whole exporter. A none Option field omits its
-// key (proto3 "unset"): that is why a root span simply has no parentSpanId,
-// and why AnyValue below is a real proto3 oneof — construct exactly the
-// alternative you mean and exactly one key hits the wire.
+// The single-file starting point: one span in Jaeger, no SDK.
+//
+// The OTLP wire is declared as Codec types that MIRROR it — every field
+// name IS the wire name — so the derived encode is the entire exporter and
+// there is no mapping layer to get wrong. A `none` Option field omits its
+// key (proto3 "unset"), which is why the root span below simply has no
+// parentSpanId, and why AnyValue is a real oneof: construct the arm you
+// mean, and exactly one key hits the wire.
 import json
 import http
 import random
+import hex
 import process
+
+let COLLECTOR = "http://localhost:4318/v1/traces"
 
 type AnyValue: Codec = {
   stringValue: Option[String] = none,
-  intValue: Option[String] = none,    // proto3 JSON: int64 rides as string
+  intValue: Option[String] = none,    // proto3 JSON: int64 rides as a string
   boolValue: Option[Bool] = none,
   doubleValue: Option[Float] = none,
 }
-
 type Attr: Codec = { key: String, value: AnyValue }
-
-type Status: Codec = { code: Int }
-
+type Status: Codec = { code: Int, message: Option[String] = none }
 type Span: Codec = {
   traceId: String,
   spanId: String,
-  parentSpanId: Option[String] = none,  // none = root: the key never hits the wire
+  parentSpanId: Option[String] = none,  // never set here: this span is a root
   name: String,
   kind: Int,
-  startTimeUnixNano: String,
+  startTimeUnixNano: String,            // fixed64 also rides as a string
   endTimeUnixNano: String,
   attributes: List[Attr],
   status: Status,
 }
-
 type Scope: Codec = { name: String, version: String }
-
 type ScopeSpans: Codec = { scope: Scope, spans: List[Span] }
-
 type Resource: Codec = { attributes: List[Attr] }
-
 type ResourceSpans: Codec = { resource: Resource, scopeSpans: List[ScopeSpans] }
-
 type Payload: Codec = { resourceSpans: List[ResourceSpans] }
 
-fn attr_str(key: String, val: String) -> Attr =
-  Attr { key: key, value: AnyValue { stringValue: some(val) } }
-
-fn attr_int(key: String, n: Int) -> Attr =
+// One constructor per oneof arm. Each fills exactly one field and leaves
+// the rest `none`, so each produces exactly one key.
+fn text(key: String, v: String) -> Attr =
+  Attr { key: key, value: AnyValue { stringValue: some(v) } }
+fn number(key: String, n: Int) -> Attr =
   Attr { key: key, value: AnyValue { intValue: some(int.to_string(n)) } }
-
-effect fn rand_bytes(n: Int) -> List[Int] =
-  if n == 0 then ([]: List[Int])
-  else [random.int(0, 255)] + rand_bytes(n - 1)!
+fn flag(key: String, b: Bool) -> Attr =
+  Attr { key: key, value: AnyValue { boolValue: some(b) } }
 
 effect fn rand_hex(n_bytes: Int) -> String =
-  rand_bytes(n_bytes)! |> bytes.from_list |> hex.encode
+  list.range(0, n_bytes)
+    |> list.map((_) => random.int(0, 255))
+    |> bytes.from_list
+    |> hex.encode
 
-effect fn main() -> Unit = {
-  // Anchor wall clock once, derive ns-precision timestamps from the monotonic clock
-  let anchor = datetime.now() * 1_000_000_000 - datetime.monotonic_ns()
-
-  let trace_id = rand_hex(16)
-  let span_id = rand_hex(8)
-
-  let start_ns = anchor + datetime.monotonic_ns()
-  process.sleep(42)
-  let end_ns = anchor + datetime.monotonic_ns()
-
-  let doc = Payload { resourceSpans: [ResourceSpans {
-    resource: Resource { attributes: [attr_str("service.name", "almide-minimal")] },
+fn document(trace_id: String, span_id: String, start_ns: Int, end_ns: Int) -> Payload =
+  Payload { resourceSpans: [ResourceSpans {
+    resource: Resource { attributes: [text("service.name", "almide-minimal")] },
     scopeSpans: [ScopeSpans {
-      scope: Scope { name: "almide-otel", version: "0.1.0" },
+      scope: Scope { name: "almide-otel", version: "0.2.0" },
       spans: [Span {
         traceId: trace_id,
         spanId: span_id,
@@ -77,14 +66,44 @@ effect fn main() -> Unit = {
         kind: 1,
         startTimeUnixNano: int.to_string(start_ns),
         endTimeUnixNano: int.to_string(end_ns),
-        attributes: [attr_str("language", "almide"), attr_int("answer", 42)],
+        attributes: [
+          text("language", "almide"),
+          number("answer", 42),
+          flag("hand.written.json", false),
+        ],
         status: Status { code: 1 },
       }],
     }],
   }] }
 
-  let headers = map.from_list([("Content-Type", "application/json")])
-  let resp = http.request("POST", "http://localhost:4318/v1/traces", json.stringify(Payload.encode(doc)), headers)!
+effect fn main() -> Unit = {
+  // datetime.now() is second-precision, which is useless for a duration.
+  // Anchor the wall clock once and let the monotonic clock supply the
+  // nanoseconds — the same trick production OTel SDKs use.
+  let anchor = datetime.now() * 1_000_000_000 - datetime.monotonic_ns()
+  let trace_id = rand_hex(16)!
+  let span_id = rand_hex(8)!
+
+  let start_ns = anchor + datetime.monotonic_ns()
+  process.sleep(42)
+  let end_ns = anchor + datetime.monotonic_ns()
+
+  let body = json.stringify(Payload.encode(document(trace_id, span_id, start_ns, end_ns)))
+  let resp = http.request("POST", COLLECTOR, body, ["Content-Type": "application/json"])!
   println("exporter response: ${resp}")
   println("trace_id: ${trace_id}")
+}
+
+// Splitting `document` out of `main` is what makes this checkable: the
+// document is a pure function of four values, so the wire can be asserted
+// without a collector, a socket, or a clock.
+test "the root span omits parentSpanId and each attribute emits one key" {
+  let wire = json.stringify(Payload.encode(document("aa", "bb", 10, 52)))
+  assert(not string.contains(wire, "parentSpanId"))
+  assert(string.contains(wire, '{"key":"language","value":{"stringValue":"almide"}}'))
+  assert(string.contains(wire, '{"key":"answer","value":{"intValue":"42"}}'))
+  assert(string.contains(wire, '{"key":"hand.written.json","value":{"boolValue":false}}'))
+  assert(string.contains(wire, '"startTimeUnixNano":"10","endTimeUnixNano":"52"'))
+  // `message` is absent because the status is OK — a none field emits no key.
+  assert(string.contains(wire, '"status":{"code":1}'))
 }

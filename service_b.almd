@@ -1,35 +1,53 @@
-// Inventory service: extracts traceparent, records a server span
-// plus a simulated-DB child span, exports both to Jaeger.
+// Inventory service: extracts the traceparent, records a server span plus
+// a simulated-DB child span, and exports both.
 import http
 import json
 import process
 import self.otel
 
 type InventoryResp: Codec = { items: List[String], trace: String }
+type ErrorResp: Codec = { error: String }
+
+let ITEMS = ["potion", "elixir"]
+let PORT = 7002
 
 effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
+  // A header that is missing OR malformed yields `none`, and `none` starts
+  // a new trace. This is the one call site that wants the raw Option form
+  // of `start`: whether a parent exists is genuinely unknown here, which is
+  // exactly what `root` and `child` are not for.
   let parent = otel.parse_traceparent(http.req_header(req, "traceparent") ?? "")
-  let span0 = otel.start_span(t, parent, "GET /inventory", otel.Server)!
-  let span = otel.with_attr(span0, "http.method", http.req_method(req))
+  let span = otel.start(t, "GET /inventory", otel.Server, parent)!
+    |> otel.attr("http.method", otel.Str(http.req_method(req)))
+    |> otel.attr("http.route", otel.Str(http.req_path(req)))
+    |> otel.attr("trace.continued", otel.Bool(option.is_some(parent)))
 
-  let db0 = otel.start_span(t, some(otel.ctx(span)), "SELECT items", otel.Internal)!
+  let db = otel.child(t, otel.ctx(span), "SELECT items", otel.Internal)!
   process.sleep(25)  // simulated DB latency
-  let db = otel.end_span(t, otel.with_attr(db0, "db.system", "sqlite"))!
+  let db_done = db
+    |> otel.attr("db.system", otel.Str("sqlite"))
+    |> otel.attr("db.rows", otel.Int64(list.len(ITEMS)))
+    |> otel.succeed
+    |> otel.finish(t)!
 
-  let done = otel.end_span(t, span)!
-  let _ = otel.export(t, [done, db])!
+  let span_done = span |> otel.succeed |> otel.finish(t)!
+  let _ = otel.export(t, [span_done, db_done])!
+
   json.stringify(InventoryResp.encode(InventoryResp {
-    items: ["potion", "elixir"],
-    trace: done.trace_id,
+    items: ITEMS,
+    trace: span_done.trace_id,
   }))
 }
 
 effect fn main() -> Unit = {
-  let t = otel.tracer("almide-inventory", "http://localhost:4318/v1/traces")!
-  println("inventory service listening on http://localhost:7002")
-  http.serve(7002, (req) =>
+  let t = otel.tracer("almide-inventory", otel.OTLP_HTTP_JSON)!
+  println("inventory service listening on http://localhost:${PORT}")
+  // `!` cannot cross a closure boundary, so the handler's Result is matched
+  // here rather than propagated — which is what turns a handler failure
+  // into a 500 instead of a dropped connection.
+  http.serve(PORT, (req) =>
     match handle(t, req) {
       ok(body) => http.json(200, body),
-      err(e) => http.json(500, "{\"error\": \"${e}\"}"),
+      err(e) => http.json(500, json.stringify(ErrorResp.encode(ErrorResp { error: e }))),
     })
 }
