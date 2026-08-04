@@ -122,9 +122,17 @@ The module prefixes in that chain are not noise — they say which layer each st
 
 Writing the first version surfaced six almide compiler bugs ([#1049–#1054](https://github.com/almide/almide/issues/1049)), all fixed within a day. The typed handler signature in `service_b.almd` exists because of that batch.
 
-This rewrite ran into six more on v0.53.1, all at the module boundary. Default arguments, the `json.encode` convenience, and the `value.encode()` method form each work in a single file but not across an `import` — which is why the SDK's public functions take every argument explicitly and encode via `Type.encode(value)`. A custom `fn T.repr` is unreachable from another module in all three spellings, so the span-kind name is an ordinary function instead. And a type name must be unique across the whole package: `otlp`'s span mirror is `WireSpan` rather than `Span` because a duplicate silently binds to the other module's type instead of erroring.
+Splitting it into modules surfaced six more, filed as [#1087–#1092](https://github.com/almide/almide/issues/1087). Most of this repo's shape is a consequence of them:
 
-None of that is visible in the demo's behaviour, but it shaped the code — which is the honest version of "written in a young language."
+| filed | why the code looks like this |
+|---|---|
+| [#1087](https://github.com/almide/almide/issues/1087) | convention methods are keyed by bare type name, so `otlp`'s span mirror is `WireSpan` rather than `Span`; and a custom `fn T.repr` is silently ignored across an import, so the span-kind name is an ordinary function |
+| [#1088](https://github.com/almide/almide/issues/1088) | default arguments vanish across an import, so every public function takes all its arguments explicitly |
+| [#1089](https://github.com/almide/almide/issues/1089) | `json.encode` does not exist across an import, so encoding is `json.stringify(Type.encode(v))` |
+| [#1090](https://github.com/almide/almide/issues/1090) | `almide fmt` deletes comments inside record bodies, so it is not run on this repo |
+| [#1091](https://github.com/almide/almide/issues/1091) | multi-line method chains do not parse, so every chain is `\|>` |
+
+Only #1087's repr case can change behaviour, and only outside the module that declares it. The rest are shape, not correctness — which is the honest version of "written in a young language."
 
 ## License
 

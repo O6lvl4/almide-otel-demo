@@ -122,9 +122,17 @@ let checkout = otel.root(t, "checkout", span.Internal)!
 
 最初の版を書いた過程でalmideコンパイラのバグが6件見つかり（[#1049–#1054](https://github.com/almide/almide/issues/1049)）、翌日までにすべて修正されました。`service_b.almd` の型付きハンドラシグネチャは、その修正バッチの産物です。
 
-この書き直しでは v0.53.1 でさらに6件、いずれもモジュール境界で踏みました。デフォルト引数、`json.encode` の短縮形、`value.encode()` のメソッド形式は、どれも1ファイルなら動くのに `import` を跨ぐと動きません——SDKの公開関数が引数をすべて明示的に取り、エンコードを `Type.encode(value)` で書いているのはそのためです。カスタム `fn T.repr` は3通りの書き方すべてで他モジュールから到達できないので、span kindの名前はただの関数にしてあります。そして型名はパッケージ全体で一意である必要があります：`otlp` のspanミラーが `Span` ではなく `WireSpan` なのは、重複するとエラーにならず**黙って他モジュールの型に束縛される**からです。
+モジュール分割の過程でさらに6件見つかり、[#1087–#1092](https://github.com/almide/almide/issues/1087) として登録しました。このリポジトリの形の大半は、その帰結です：
 
-これらはdemoの挙動には一切現れませんが、コードの形は決めています——「若い言語で書く」というのは正直に言えばそういうことです。
+| issue | コードがこうなっている理由 |
+|---|---|
+| [#1087](https://github.com/almide/almide/issues/1087) | convention methodが型名（修飾なし）でキーされるため、`otlp` のspanミラーは `Span` ではなく `WireSpan`。またカスタム `fn T.repr` は他モジュールから**黙って無視される**ため、span kindの名前はただの関数 |
+| [#1088](https://github.com/almide/almide/issues/1088) | デフォルト引数が `import` を跨ぐと消えるため、公開関数は引数をすべて明示的に取る |
+| [#1089](https://github.com/almide/almide/issues/1089) | `json.encode` が `import` 越しには存在しないため、エンコードは `json.stringify(Type.encode(v))` |
+| [#1090](https://github.com/almide/almide/issues/1090) | `almide fmt` がレコード本体内のコメントを削除するため、このリポジトリでは fmt を使わない |
+| [#1091](https://github.com/almide/almide/issues/1091) | メソッドチェーンが複数行に跨れないため、チェーンはすべて `\|>` |
+
+挙動が変わりうるのは #1087 のrepr（しかも宣言モジュールの外だけ）のみで、あとは正しさではなく形の問題です——「若い言語で書く」というのは正直に言えばそういうことです。
 
 ## ライセンス
 
