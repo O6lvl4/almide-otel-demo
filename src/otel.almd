@@ -234,10 +234,12 @@ fn attr_json(v: AttrValue) -> String = json.stringify(OtlpAnyValue.encode(any_va
 fn status_json(s: SpanStatus) -> String = json.stringify(OtlpStatus.encode(status_wire(s)))
 fn span_json(s: Span) -> String = json.stringify(OtlpSpan.encode(span_wire(s)))
 
-// Pure: the entire exporter minus the socket. This is what the tests pin,
-// and it is why they need no collector.
-fn payload(t: Tracer, spans: List[Span]) -> String = {
-  let doc = OtlpPayload {
+// The whole OTLP document as a value. Keeping this separate from the
+// stringify step is what lets the golden test below print it PRETTY and
+// compare against a readable block, while the wire still gets the compact
+// form — both come from the same derived `encode`.
+fn document(t: Tracer, spans: List[Span]) -> OtlpPayload =
+  OtlpPayload {
     resourceSpans: [OtlpResourceSpans {
       resource: OtlpResource {
         attributes: [attr_wire(("service.name", Str(t.service)))],
@@ -248,8 +250,11 @@ fn payload(t: Tracer, spans: List[Span]) -> String = {
       }],
     }],
   }
-  json.stringify(OtlpPayload.encode(doc))
-}
+
+// Pure: the entire exporter minus the socket. This is what the tests pin,
+// and it is why they need no collector.
+fn payload(t: Tracer, spans: List[Span]) -> String =
+  json.stringify(OtlpPayload.encode(document(t, spans)))
 
 // Returns the collector's response body ({"partialSuccess":{}} = accepted).
 effect fn export(t: Tracer, spans: List[Span]) -> String =
@@ -321,22 +326,68 @@ test "a malformed traceparent is rejected, not repaired" where [
   assert_eq(parse_traceparent(h), none)
 }
 
-// The one golden document: resource, scope, and an attributed span.
-test "the payload is the OTLP document, byte for byte" {
+// The one golden document. A heredoc needs no escapes and no
+// concatenation, so the expected value IS the OTLP document — and
+// `parentSpanId` being absent between spanId and name is something you can
+// SEE here rather than take on faith.
+test "the payload is the OTLP document" {
   let t = Tracer { service: "svc", endpoint: "", anchor: 0 }
   let s = Span {
     trace_id: "aa", span_id: "bb", parent_span_id: none, name: "op",
     kind: Client, start_ns: 10, end_ns: 20, attrs: [], status: Success,
   } |> attr("k", Str("v"))
   assert_eq(
-    payload(t, [s]),
-    '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name",'
-      + '"value":{"stringValue":"svc"}}]},"scopeSpans":[{"scope":'
-      + '{"name":"almide-otel","version":"0.2.0"},"spans":[{"traceId":"aa",'
-      + '"spanId":"bb","name":"op","kind":3,"startTimeUnixNano":"10",'
-      + '"endTimeUnixNano":"20","attributes":[{"key":"k","value":'
-      + '{"stringValue":"v"}}],"status":{"code":1}}]}]}]}',
+    json.stringify_pretty(OtlpPayload.encode(document(t, [s]))),
+    """
+      {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "svc"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "almide-otel",
+                  "version": "0.2.0"
+                },
+                "spans": [
+                  {
+                    "traceId": "aa",
+                    "spanId": "bb",
+                    "name": "op",
+                    "kind": 3,
+                    "startTimeUnixNano": "10",
+                    "endTimeUnixNano": "20",
+                    "attributes": [
+                      {
+                        "key": "k",
+                        "value": {
+                          "stringValue": "v"
+                        }
+                      }
+                    ],
+                    "status": {
+                      "code": 1
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    """,
   )
+  // The wire itself is the compact form of that same encode.
+  assert(string.starts_with(payload(t, [s]), '{"resourceSpans":[{"resource":'))
 }
 
 test "the builder chain records attributes in order" {
