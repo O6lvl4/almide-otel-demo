@@ -35,7 +35,7 @@ GET /inventory   otel.status_code        = ERROR
 
 ## 動かす
 
-必要なのはDockerと、**v0.53.2以降**のalmideです：
+必要なのはDockerと、**v0.53.3以降**のalmideです：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
@@ -133,7 +133,9 @@ let checkout = otel.root(t, "checkout")!
 | [#1091](https://github.com/almide/almide/issues/1091) 複数行メソッドチェーンが構文エラー | チェーンはここでは読みやすい `\|>` のままだが、両形式とも動く |
 | [#1092](https://github.com/almide/almide/issues/1092) コンパイルできないドキュメント例 | — |
 
-未解決の形がひとつだけ残っていて、効いている箇所にはコードにそう書いてあります：`otlp` のspanミラーが `Span` ではなく `WireSpan` なのは、ドメイン側のモジュール名が `span` で型名が `Span` だからです——両方をbareで綴ると、あのファイル内の参照が誤った方に解決されます（[#1093](https://github.com/almide/almide/issues/1093)、[#1094](https://github.com/almide/almide/issues/1094)）。OTLPミラーの他の型はワイヤ本来の名前のままです。
+このリポジトリから出した [#1093](https://github.com/almide/almide/issues/1093) と [#1094](https://github.com/almide/almide/issues/1094) も v0.53.3 で修正され、同種の問題はほぼ閉じました：依存パッケージのサブモジュールが兄弟の型を解決できるようになり、derive された Codec メソッドがそもそもリンクするようになり、同名衝突で wasm と native が再び一致します。
+
+残るのはひとつだけで、効いている箇所にはコードにそう書いてあります：`otlp` のspanミラーが `Span` ではなく `WireSpan` なのは、ドメイン側のモジュール名が `span` で型名が `Span` だからです。両方をbareで綴るとあのファイル内の参照が誤った方に解決されますが、これは**人間が読んでも曖昧**なので、回避ではなく明記する選択をしています。OTLPミラーの他の型はワイヤ本来の名前のままです。
 
 ## ライセンス
 

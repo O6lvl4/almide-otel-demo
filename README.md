@@ -35,7 +35,7 @@ GET /inventory   otel.status_code        = ERROR
 
 ## Run it
 
-You need Docker and almide **v0.53.2 or newer**:
+You need Docker and almide **v0.53.3 or newer**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/almide/almide/main/tools/install.sh | sh
@@ -133,7 +133,9 @@ Splitting it into modules surfaced six more, filed as [#1087–#1092](https://gi
 | [#1091](https://github.com/almide/almide/issues/1091) multi-line method chains did not parse | chains stay `\|>`, which reads better here, but both forms work |
 | [#1092](https://github.com/almide/almide/issues/1092) a docs example that could not compile | — |
 
-One shape is still open, and the code says so where it bites: `otlp`'s span mirror is `WireSpan`, not `Span`, because the domain module is itself called `span` and its type is `Span` — with both spelled bare, a reference inside that file still resolves to the wrong one ([#1093](https://github.com/almide/almide/issues/1093), [#1094](https://github.com/almide/almide/issues/1094)). Everything else in the OTLP mirror keeps the wire's own names.
+[#1093](https://github.com/almide/almide/issues/1093) and [#1094](https://github.com/almide/almide/issues/1094) — filed from this repo and fixed in v0.53.3 — closed the rest of that class: a dependency package's submodules resolve their siblings' types, their derived Codec methods link at all, and the wasm leg agrees with native on a same-name collision again.
+
+One shape stays, and the code says so where it bites: `otlp`'s span mirror is `WireSpan`, not `Span`, because the domain module is itself called `span` and its type is `Span`. With both spelled bare a reference inside that file resolves to the wrong one — which is ambiguous to a human reader too, so it is written out rather than worked around. Everything else in the OTLP mirror keeps the wire's own names.
 
 ## License
 
