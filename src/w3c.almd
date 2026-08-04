@@ -1,0 +1,56 @@
+// W3C Trace Context — the one header that joins two processes into one
+// trace. This module implements a published standard and nothing else, so
+// it depends only on the identity type and knows nothing about OTLP.
+//
+// https://www.w3.org/TR/trace-context/
+import self.span
+
+let HEX_DIGITS = "0123456789abcdef"
+let VERSION = "00"
+let SAMPLED = "01"
+
+fn is_hex(s: String) -> Bool =
+  string.chars(s) |> list.all((c) => string.contains(HEX_DIGITS, c))
+
+fn traceparent(c: span.SpanCtx) -> String =
+  "${VERSION}-${c.trace_id}-${c.span_id}-${SAMPLED}"
+
+// A malformed header must start a NEW trace rather than corrupt the
+// caller's, so every check below rejects instead of repairing. Each is a
+// MUST from the recommendation, including the all-zero ids, which the spec
+// defines as its own "invalid" sentinels.
+fn parse_traceparent(h: String) -> Option[span.SpanCtx] = {
+  let parts = string.split(h, "-")
+  guard list.len(parts) == 4 else none
+  let version = list.get_or(parts, 0, "")
+  let tid = list.get_or(parts, 1, "")
+  let sid = list.get_or(parts, 2, "")
+  guard version == VERSION else none
+  guard string.len(tid) == 32 and is_hex(tid) and tid != string.repeat("0", 32) else none
+  guard string.len(sid) == 16 and is_hex(sid) and sid != string.repeat("0", 16) else none
+  some(span.SpanCtx { trace_id: tid, span_id: sid })
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+test "traceparent round-trips through the header" {
+  // The example identifiers from the W3C recommendation itself.
+  let c = span.SpanCtx {
+    trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+    span_id: "00f067aa0ba902b7",
+  }
+  assert_eq(traceparent(c), "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+  assert_eq(parse_traceparent(traceparent(c)), some(c))
+}
+
+test "a malformed traceparent is rejected, not repaired" where [
+  "empty"       [h = ""],
+  "too few"     [h = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7"],
+  "bad version" [h = "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"],
+  "short trace" [h = "00-4bf92f3577b34da6-00f067aa0ba902b7-01"],
+  "non hex"     [h = "00-4bf92f3577b34da6a3ce929d0e0e47zz-00f067aa0ba902b7-01"],
+  "zero trace"  [h = "00-00000000000000000000000000000000-00f067aa0ba902b7-01"],
+  "zero span"   [h = "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"],
+] {
+  assert_eq(parse_traceparent(h), none)
+}

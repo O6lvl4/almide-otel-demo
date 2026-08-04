@@ -1,0 +1,220 @@
+// The wire: OTLP/HTTP + JSON, per the proto3 JSON mapping.
+//
+// These records MIRROR opentelemetry-proto — every field name IS the wire
+// name — so the derived Codec emits the document and no mapping layer
+// exists. A `none` Option field omits its key, exactly proto3 "unset",
+// which is why a root span simply has no parentSpanId and why AnyValue is
+// a real oneof rather than four nullable columns.
+//
+// Everything here is pure. The socket lives in `otel`, which is what lets
+// the tests below assert real bytes with no collector.
+import json
+import self.span
+
+let ENDPOINT_PATH = "/v1/traces"
+let SCOPE_NAME = "almide-otel"
+let SCOPE_VERSION = "0.2.0"
+
+type AnyValue: Codec = {
+  stringValue: Option[String] = none,
+  intValue: Option[String] = none,    // proto3 JSON: int64 rides as a string
+  boolValue: Option[Bool] = none,
+  doubleValue: Option[Float] = none,
+}
+type KeyValue: Codec = { key: String, value: AnyValue }
+type Status: Codec = { code: Int, message: Option[String] = none }
+// The proto message is just `Span`, but a type name has to be unique across
+// the whole package in 0.53.1 — module qualification does not isolate the
+// namespace, and a duplicate silently binds to the other module's type. So
+// this one mirror deviates from the wire name; the FIELD names, which are
+// what the derive actually emits, do not.
+type WireSpan: Codec = {
+  traceId: String,
+  spanId: String,
+  parentSpanId: Option[String] = none,
+  name: String,
+  kind: Int,
+  startTimeUnixNano: String,          // fixed64 also rides as a string
+  endTimeUnixNano: String,
+  attributes: List[KeyValue],
+  status: Status,
+}
+type Scope: Codec = { name: String, version: String }
+type ScopeSpans: Codec = { scope: Scope, spans: List[WireSpan] }
+type Resource: Codec = { attributes: List[KeyValue] }
+type ResourceSpans: Codec = { resource: Resource, scopeSpans: List[ScopeSpans] }
+type Payload: Codec = { resourceSpans: List[ResourceSpans] }
+
+// ── The bridges ─────────────────────────────────────────────────────────
+// One `match` per domain type. That match IS the mapping — there is no
+// table, no reflection, and no runtime check that "exactly one arm is set".
+
+fn kind_code(k: span.SpanKind) -> Int = match k {
+  span.Internal => 1,
+  span.Server   => 2,
+  span.Client   => 3,
+  span.Producer => 4,
+  span.Consumer => 5,
+}
+
+fn any_value(v: span.AttrValue) -> AnyValue = match v {
+  span.Str(s)    => AnyValue { stringValue: some(s) },
+  span.Int64(n)  => AnyValue { intValue: some(int.to_string(n)) },
+  span.Bool(b)   => AnyValue { boolValue: some(b) },
+  span.Double(f) => AnyValue { doubleValue: some(f) },
+}
+
+fn status_wire(s: span.SpanStatus) -> Status = match s {
+  span.Unset      => Status { code: 0 },
+  span.Success    => Status { code: 1 },
+  span.Failure(m) => Status { code: 2, message: some(m) },
+}
+
+fn attr_wire(entry: (String, span.AttrValue)) -> KeyValue = {
+  let (k, v) = entry
+  KeyValue { key: k, value: any_value(v) }
+}
+
+fn span_wire(s: span.Span) -> WireSpan =
+  WireSpan {
+    traceId: s.trace_id,
+    spanId: s.span_id,
+    parentSpanId: s.parent_span_id,   // none stays none → key omitted
+    name: s.name,
+    kind: kind_code(s.kind),
+    startTimeUnixNano: int.to_string(s.start_ns),
+    endTimeUnixNano: int.to_string(s.end_ns),
+    attributes: s.attrs |> list.map(attr_wire),
+    status: status_wire(s.status),
+  }
+
+// The whole document as a value. Keeping this separate from the stringify
+// step is what lets the golden test print it PRETTY and compare against a
+// readable block, while the wire gets the compact form — both from the same
+// derived `encode`.
+fn document(service: String, spans: List[span.Span]) -> Payload =
+  Payload {
+    resourceSpans: [ResourceSpans {
+      resource: Resource {
+        attributes: [attr_wire(("service.name", span.Str(service)))],
+      },
+      scopeSpans: [ScopeSpans {
+        scope: Scope { name: SCOPE_NAME, version: SCOPE_VERSION },
+        spans: spans |> list.map(span_wire),
+      }],
+    }],
+  }
+
+// The entire exporter minus the socket.
+fn payload(service: String, spans: List[span.Span]) -> String =
+  json.stringify(Payload.encode(document(service, spans)))
+
+// ── Tests ───────────────────────────────────────────────────────────────
+// Encoding one message is `stringify` over the derived `encode`.
+// (`json.encode(x)` folds those into one call, but in 0.53.1 it does not
+// resolve across a module boundary, so the two steps stay explicit.)
+
+fn attr_json(v: span.AttrValue) -> String = json.stringify(AnyValue.encode(any_value(v)))
+fn status_json(s: span.SpanStatus) -> String = json.stringify(Status.encode(status_wire(s)))
+fn span_json(s: span.Span) -> String = json.stringify(WireSpan.encode(span_wire(s)))
+
+fn fixture() -> span.Span =
+  span.Span {
+    trace_id: "aa", span_id: "bb", parent_span_id: none, name: "op",
+    kind: span.Client, start_ns: 10, end_ns: 20, attrs: [], status: span.Success,
+  }
+
+test "span kinds cover the OTLP enum" where [
+  "internal" [k = span.Internal, code = 1],
+  "server"   [k = span.Server,   code = 2],
+  "client"   [k = span.Client,   code = 3],
+  "producer" [k = span.Producer, code = 4],
+  "consumer" [k = span.Consumer, code = 5],
+] {
+  assert_eq(kind_code(k), code)
+}
+
+test "AnyValue is a oneof: exactly one key reaches the wire" where [
+  "string" [v = span.Str("almide"), want = '{"stringValue":"almide"}'],
+  "int64"  [v = span.Int64(42),     want = '{"intValue":"42"}'],
+  "bool"   [v = span.Bool(true),    want = '{"boolValue":true}'],
+  "double" [v = span.Double(1.5),   want = '{"doubleValue":1.5}'],
+] {
+  assert_eq(attr_json(v), want)
+}
+
+test "status carries a message only on the error arm" where [
+  "unset" [s = span.Unset,           want = '{"code":0}'],
+  "ok"    [s = span.Success,         want = '{"code":1}'],
+  "error" [s = span.Failure("boom"), want = '{"code":2,"message":"boom"}'],
+] {
+  assert_eq(status_json(s), want)
+}
+
+// Emitting `null` here would be a DIFFERENT document: proto3 "unset" is an
+// absent key, and a collector is entitled to reject the null.
+test "a root span omits parentSpanId; a child emits it" {
+  assert(not string.contains(span_json(fixture()), "parentSpanId"))
+  let child = { ...fixture(), parent_span_id: some("p") }
+  assert(string.contains(span_json(child), '"parentSpanId":"p"'))
+}
+
+// The one golden document. A heredoc needs no escapes and no
+// concatenation, so the expected value IS the OTLP document — and
+// `parentSpanId` being absent between spanId and name is something you can
+// SEE here rather than take on faith.
+test "the payload is the OTLP document" {
+  let s = fixture() |> span.attr("k", span.Str("v"))
+  assert_eq(
+    json.stringify_pretty(Payload.encode(document("svc", [s]))),
+    """
+      {
+        "resourceSpans": [
+          {
+            "resource": {
+              "attributes": [
+                {
+                  "key": "service.name",
+                  "value": {
+                    "stringValue": "svc"
+                  }
+                }
+              ]
+            },
+            "scopeSpans": [
+              {
+                "scope": {
+                  "name": "almide-otel",
+                  "version": "0.2.0"
+                },
+                "spans": [
+                  {
+                    "traceId": "aa",
+                    "spanId": "bb",
+                    "name": "op",
+                    "kind": 3,
+                    "startTimeUnixNano": "10",
+                    "endTimeUnixNano": "20",
+                    "attributes": [
+                      {
+                        "key": "k",
+                        "value": {
+                          "stringValue": "v"
+                        }
+                      }
+                    ],
+                    "status": {
+                      "code": 1
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    """,
+  )
+  // The wire itself is the compact form of that same encode.
+  assert(string.starts_with(payload("svc", [s]), '{"resourceSpans":[{"resource":'))
+}

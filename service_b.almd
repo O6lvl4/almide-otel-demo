@@ -4,6 +4,8 @@ import http
 import json
 import process
 import self.otel
+import self.span
+import self.w3c
 
 type InventoryResp: Codec = { items: List[String], trace: String }
 type ErrorResp: Codec = { error: String }
@@ -16,26 +18,26 @@ effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
   // a new trace. This is the one call site that wants the raw Option form
   // of `start`: whether a parent exists is genuinely unknown here, which is
   // exactly what `root` and `child` are not for.
-  let parent = otel.parse_traceparent(http.req_header(req, "traceparent") ?? "")
-  let span = otel.start(t, "GET /inventory", otel.Server, parent)!
-    |> otel.attr("http.method", otel.Str(http.req_method(req)))
-    |> otel.attr("http.route", otel.Str(http.req_path(req)))
-    |> otel.attr("trace.continued", otel.Bool(option.is_some(parent)))
+  let parent = w3c.parse_traceparent(http.req_header(req, "traceparent") ?? "")
+  let inbound = otel.start(t, "GET /inventory", span.Server, parent)!
+    |> span.attr("http.method", span.Str(http.req_method(req)))
+    |> span.attr("http.route", span.Str(http.req_path(req)))
+    |> span.attr("trace.continued", span.Bool(option.is_some(parent)))
 
-  let db = otel.child(t, otel.ctx(span), "SELECT items", otel.Internal)!
+  let db = otel.child(t, span.ctx(inbound), "SELECT items", span.Internal)!
   process.sleep(25)  // simulated DB latency
   let db_done = db
-    |> otel.attr("db.system", otel.Str("sqlite"))
-    |> otel.attr("db.rows", otel.Int64(list.len(ITEMS)))
-    |> otel.succeed
+    |> span.attr("db.system", span.Str("sqlite"))
+    |> span.attr("db.rows", span.Int64(list.len(ITEMS)))
+    |> span.succeed
     |> otel.finish(t)!
 
-  let span_done = span |> otel.succeed |> otel.finish(t)!
-  let _ = otel.export(t, [span_done, db_done])!
+  let inbound_done = inbound |> span.succeed |> otel.finish(t)!
+  let _ = otel.export(t, [inbound_done, db_done])!
 
   json.stringify(InventoryResp.encode(InventoryResp {
     items: ITEMS,
-    trace: span_done.trace_id,
+    trace: inbound_done.trace_id,
   }))
 }
 

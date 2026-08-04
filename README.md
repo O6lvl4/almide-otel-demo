@@ -2,7 +2,7 @@
 
 日本語版: [README.ja.md](./README.ja.md)
 
-A from-scratch OpenTelemetry tracing SDK written in pure [Almide](https://github.com/almide/almide) — about 160 lines — plus a two-service demo that produces one distributed trace in Jaeger.
+A from-scratch OpenTelemetry tracing SDK written in pure [Almide](https://github.com/almide/almide) — about 166 lines across four modules — plus a two-service demo that produces one distributed trace in Jaeger.
 
 There is no OpenTelemetry Collector and no SDK dependency. Spans are encoded as OTLP/HTTP + JSON and posted straight to Jaeger's native OTLP endpoint. Context crosses the HTTP boundary as a W3C `traceparent` header.
 
@@ -59,19 +59,34 @@ Open http://localhost:16686, pick the `almide-checkout` service, and the waterfa
 The encoder is a pure function, so the wire is asserted without a collector, a socket, or a clock. No Docker needed:
 
 ```bash
-almide test          # 24 tests
+almide test          # 35 tests
 ```
 
 They pin the things a tracing SDK gets quietly wrong: that each oneof arm emits exactly one key, that a root span has no `parentSpanId` at all, that a status message appears only on the error arm, that a malformed `traceparent` is rejected rather than repaired, and one golden OTLP document byte for byte.
 
 ## Layout
 
-| file | |
+The SDK is 166 lines across four modules, split by what each one is *responsible for*. Three of them are pure — no clock, no socket, no randomness — which is exactly why 31 of the 35 tests are plain value comparisons.
+
+```
+span ← w3c
+span ← otlp ← otel
+```
+
+| module | responsibility | impure? |
+|---|---|---|
+| `src/span.almd` | what a span IS: the kind/value/status matrices and the span's own verbs | no |
+| `src/w3c.almd` | the W3C Trace Context header, inject and parse | no |
+| `src/otlp.almd` | the wire: proto3 mirror types and the domain→wire bridges | no |
+| `src/otel.almd` | the tracer: clock, id generation, and the socket | **yes** |
+
+| program | |
 |---|---|
-| `src/otel.almd` | the SDK: Tracer, spans, id generation, OTLP/HTTP JSON export, traceparent inject/parse, and the tests |
 | `service_a.almd` | checkout — root + client span, injects `traceparent` into the outbound request |
 | `service_b.almd` | inventory — extracts `traceparent`, records a server span and a DB child span |
-| `minimal.almd` | smallest possible program that puts a span in Jaeger |
+| `minimal.almd` | smallest possible program that puts a span in Jaeger; no SDK, no imports from `src/` |
+
+A service imports `otel` for the tracer, `span` for the span's verbs, and `w3c` for the header. It never imports `otlp` — the wire format is an implementation detail of `export`, and nothing outside that one function names it.
 
 ## How it works
 
@@ -92,12 +107,14 @@ They pin the things a tracing SDK gets quietly wrong: that each oneof arm emits 
 One rule decides every signature: a function that **creates** takes the tracer first, a function that **transforms** a span takes the span first. So a span's whole life story is one pipe chain, ending in the single effectful step that stamps the clock.
 
 ```almide
-let root = otel.root(t, "checkout", otel.Internal)!
-  |> otel.attr("order.id", otel.Str("A-1042"))
-  |> otel.attr("order.total", otel.Double(38.5))
-  |> otel.succeed
+let checkout = otel.root(t, "checkout", span.Internal)!
+  |> span.attr("order.id", span.Str("A-1042"))
+  |> span.attr("order.total", span.Double(38.5))
+  |> span.succeed
   |> otel.finish(t)!
 ```
+
+The module prefixes in that chain are not noise — they say which layer each step belongs to. Everything spelled `span.` is a pure value transform; the two spelled `otel.` are the only ones that touch a clock.
 
 `root` and `child` are the two entry points: `child` takes a `SpanCtx` rather than an `Option`, so a child without a parent is unwritable. The raw `start` — the one that takes `Option[SpanCtx]` — is for the single case where a parent genuinely may not exist, which is the inbound server handler.
 
@@ -105,7 +122,9 @@ let root = otel.root(t, "checkout", otel.Internal)!
 
 Writing the first version surfaced six almide compiler bugs ([#1049–#1054](https://github.com/almide/almide/issues/1049)), all fixed within a day. The typed handler signature in `service_b.almd` exists because of that batch.
 
-This rewrite ran into four more on v0.53.1, all at the module boundary: default arguments, the `json.encode` convenience, and the `value.encode()` method form all work in a single file but not across an `import`. That is why the SDK's public functions take every argument explicitly and encode via `Type.encode(value)` — the code is shaped around what actually compiles, not around what the docs describe.
+This rewrite ran into six more on v0.53.1, all at the module boundary. Default arguments, the `json.encode` convenience, and the `value.encode()` method form each work in a single file but not across an `import` — which is why the SDK's public functions take every argument explicitly and encode via `Type.encode(value)`. A custom `fn T.repr` is unreachable from another module in all three spellings, so the span-kind name is an ordinary function instead. And a type name must be unique across the whole package: `otlp`'s span mirror is `WireSpan` rather than `Span` because a duplicate silently binds to the other module's type instead of erroring.
+
+None of that is visible in the demo's behaviour, but it shaped the code — which is the honest version of "written in a young language."
 
 ## License
 

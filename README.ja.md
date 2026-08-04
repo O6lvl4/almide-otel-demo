@@ -2,7 +2,7 @@
 
 English: [README.md](./README.md)
 
-純粋な [Almide](https://github.com/almide/almide) で書いた、ゼロからのOpenTelemetryトレーシングSDK（約160行）と、Jaegerに1本の分散トレースを表示する2サービスdemo。
+純粋な [Almide](https://github.com/almide/almide) で書いた、ゼロからのOpenTelemetryトレーシングSDK（4モジュール・約166行）と、Jaegerに1本の分散トレースを表示する2サービスdemo。
 
 OpenTelemetry CollectorもSDK依存もありません。spanをOTLP/HTTP + JSONでエンコードして、JaegerのネイティブOTLPエンドポイントに直接POSTします。コンテキストはW3C `traceparent` ヘッダでHTTP境界を越えます。
 
@@ -59,19 +59,34 @@ http://localhost:16686 を開いて `almide-checkout` サービスを選ぶと�
 エンコーダは純粋関数なので、コレクタもソケットも時計もなしにワイヤを検証できます。Dockerは不要です：
 
 ```bash
-almide test          # 24件
+almide test          # 35件
 ```
 
 トレーシングSDKが静かに間違えがちなところを固定してあります：oneofの各armがキーを**ちょうど1つ**だけ出すこと、rootのspanには`parentSpanId`が**そもそも存在しない**こと、statusのmessageはerror armにしか現れないこと、壊れた`traceparent`は**修復せず拒否**すること、そしてOTLPドキュメント1件のバイト単位の一致。
 
 ## 構成
 
-| ファイル | |
+SDKは4モジュール・166行で、**責務**で分けてあります。うち3つは純粋——時計もソケットも乱数も触りません——だからこそ35件中31件が単なる値の比較で済みます。
+
+```
+span ← w3c
+span ← otlp ← otel
+```
+
+| モジュール | 責務 | 副作用 |
+|---|---|---|
+| `src/span.almd` | spanとは何か：kind/value/statusのmatrixと、span自身の動詞 | なし |
+| `src/w3c.almd` | W3C Trace Contextヘッダのinject/parse | なし |
+| `src/otlp.almd` | ワイヤ：proto3ミラー型と、ドメイン→ワイヤの橋渡し | なし |
+| `src/otel.almd` | tracer：時計、ID生成、ソケット | **あり** |
+
+| プログラム | |
 |---|---|
-| `src/otel.almd` | SDK本体：Tracer、span、ID生成、OTLP/HTTP JSONエクスポート、traceparentのinject/parse、およびテスト |
 | `service_a.almd` | checkout — rootとクライアントspanを記録し、外向きリクエストに `traceparent` を注入 |
 | `service_b.almd` | inventory — `traceparent` を抽出し、サーバspanとDB子spanを記録 |
-| `minimal.almd` | Jaegerにspanを1本出す最小のプログラム |
+| `minimal.almd` | Jaegerにspanを1本出す最小のプログラム。SDKなし、`src/` からのimportもなし |
+
+サービス側がimportするのは、tracerのための `otel`、spanの動詞のための `span`、ヘッダのための `w3c` の3つだけです。`otlp` はimportしません——ワイヤ形式は `export` の実装詳細であり、その関数の外では誰も名前を呼びません。
 
 ## 仕組み
 
@@ -92,12 +107,14 @@ almide test          # 24件
 シグネチャはひとつの規則で決まります：**生成する**関数はtracerを先に取り、span を**変換する**関数はspanを先に取る。だからspanの一生はパイプ1本で書けて、最後に時計を刻む唯一の副作用ステップで終わります。
 
 ```almide
-let root = otel.root(t, "checkout", otel.Internal)!
-  |> otel.attr("order.id", otel.Str("A-1042"))
-  |> otel.attr("order.total", otel.Double(38.5))
-  |> otel.succeed
+let checkout = otel.root(t, "checkout", span.Internal)!
+  |> span.attr("order.id", span.Str("A-1042"))
+  |> span.attr("order.total", span.Double(38.5))
+  |> span.succeed
   |> otel.finish(t)!
 ```
+
+このチェーンのモジュール接頭辞はノイズではなく、各ステップが**どの層に属すか**を語っています。`span.` と書かれているものはすべて純粋な値の変換で、時計に触れるのは `otel.` の2つだけです。
 
 入口は `root` と `child` の2つです。`child` は `Option` ではなく `SpanCtx` を取るので、「親のいない子span」はそもそも書けません。`Option[SpanCtx]` を取る生の `start` は、親が本当に存在しないかもしれない唯一のケース——受信側のサーバハンドラ——のためにあります。
 
@@ -105,7 +122,9 @@ let root = otel.root(t, "checkout", otel.Internal)!
 
 最初の版を書いた過程でalmideコンパイラのバグが6件見つかり（[#1049–#1054](https://github.com/almide/almide/issues/1049)）、翌日までにすべて修正されました。`service_b.almd` の型付きハンドラシグネチャは、その修正バッチの産物です。
 
-この書き直しでは v0.53.1 でさらに4件、いずれもモジュール境界で踏みました：デフォルト引数、`json.encode` の短縮形、`value.encode()` のメソッド形式は、どれも1ファイルなら動くのに `import` を跨ぐと動きません。SDKの公開関数が引数をすべて明示的に取り、エンコードを `Type.encode(value)` で書いているのはそのためです——このコードはドキュメントの記述ではなく、実際にコンパイルが通るものに合わせて形が決まっています。
+この書き直しでは v0.53.1 でさらに6件、いずれもモジュール境界で踏みました。デフォルト引数、`json.encode` の短縮形、`value.encode()` のメソッド形式は、どれも1ファイルなら動くのに `import` を跨ぐと動きません——SDKの公開関数が引数をすべて明示的に取り、エンコードを `Type.encode(value)` で書いているのはそのためです。カスタム `fn T.repr` は3通りの書き方すべてで他モジュールから到達できないので、span kindの名前はただの関数にしてあります。そして型名はパッケージ全体で一意である必要があります：`otlp` のspanミラーが `Span` ではなく `WireSpan` なのは、重複するとエラーにならず**黙って他モジュールの型に束縛される**からです。
+
+これらはdemoの挙動には一切現れませんが、コードの形は決めています——「若い言語で書く」というのは正直に言えばそういうことです。
 
 ## ライセンス
 

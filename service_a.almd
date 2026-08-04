@@ -1,8 +1,14 @@
 // Checkout service (one-shot client): a root span plus a client span, and
 // the traceparent header that hands the trace to the inventory service.
+//
+// Three imports, three responsibilities: `otel` owns the clock and the
+// socket, `span` owns the span's own verbs, `w3c` owns the header. The
+// wire format never appears here — that is `otel.export`'s business.
 import http
 import process
 import self.otel
+import self.span
+import self.w3c
 
 let INVENTORY = "http://localhost:7002/inventory"
 
@@ -11,34 +17,34 @@ effect fn main() -> Unit = {
 
   // All four AnyValue arms appear here, and each lands on the wire as its
   // own proto3 type rather than as a stringified everything.
-  let root = otel.root(t, "checkout", otel.Internal)!
-    |> otel.attr("order.id", otel.Str("A-1042"))
-    |> otel.attr("order.items", otel.Int64(2))
-    |> otel.attr("order.total", otel.Double(38.5))
-    |> otel.attr("order.express", otel.Bool(true))
+  let checkout = otel.root(t, "checkout", span.Internal)!
+    |> span.attr("order.id", span.Str("A-1042"))
+    |> span.attr("order.items", span.Int64(2))
+    |> span.attr("order.total", span.Double(38.5))
+    |> span.attr("order.express", span.Bool(true))
 
   // The child names its parent by context, and the SAME context serializes
   // into the header. One value, two consumers — the local span tree and the
   // remote one cannot disagree about who the parent is.
-  let call = otel.child(t, otel.ctx(root), "GET /inventory", otel.Client)!
-  let resp = http.request("GET", INVENTORY, "", ["traceparent": otel.traceparent(otel.ctx(call))])
+  let call = otel.child(t, span.ctx(checkout), "GET /inventory", span.Client)!
+  let resp = http.request("GET", INVENTORY, "", ["traceparent": w3c.traceparent(span.ctx(call))])
 
   let called = call
-    |> otel.attr("http.method", otel.Str("GET"))
-    |> otel.attr("peer.service", otel.Str("almide-inventory"))
+    |> span.attr("http.method", span.Str("GET"))
+    |> span.attr("peer.service", span.Str("almide-inventory"))
 
   // The request's outcome IS the span's status. Leaving `resp` as a Result
   // instead of unwrapping it with `!` is what makes that possible: a failed
   // call still produces a finished, exported span that says why.
   let call_done = match resp {
-    ok(_) => otel.succeed(called),
-    err(e) => otel.fail(called, e),
+    ok(_) => span.succeed(called),
+    err(e) => span.fail(called, e),
   } |> otel.finish(t)!
 
   process.sleep(10)  // simulated post-processing
-  let root_done = root |> otel.succeed |> otel.finish(t)!
+  let checkout_done = checkout |> span.succeed |> otel.finish(t)!
 
-  let _ = otel.export(t, [root_done, call_done])!
+  let _ = otel.export(t, [checkout_done, call_done])!
   println("inventory says: ${resp ?? "<unreachable>"}")
-  println("trace: ${root_done.trace_id}")
+  println("trace: ${checkout_done.trace_id}")
 }

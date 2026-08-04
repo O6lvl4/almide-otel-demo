@@ -1,0 +1,102 @@
+// The domain: what a span IS, with no opinion about how it is serialized
+// or transported. Nothing in this module touches JSON, HTTP, or the clock,
+// which is why all of its tests are plain value comparisons.
+//
+// Each type here is a COMPLETE matrix of what OTLP allows, so an
+// unrepresentable state is unwritable rather than merely undocumented.
+
+// The five OTLP span kinds.
+type SpanKind = Internal | Server | Client | Producer | Consumer
+
+// proto3 `AnyValue` is a oneof. Here it is a sum type: exactly one arm
+// exists by construction. `otlp.any_value` turns it into the wire's
+// all-Option mirror, where exactly one key survives.
+type AttrValue = Str(String) | Int64(Int) | Bool(Bool) | Double(Float)
+
+// proto3 `StatusCode`, all three cells. Only the error arm carries a
+// message, which is exactly what the protocol says: `message` is meaningful
+// only when code = 2. (`Ok` is a reserved token in Almide, hence
+// Success/Failure for the OTel names OK/ERROR.)
+type SpanStatus = Unset | Success | Failure(String)
+
+// The identity a child needs in order to name its parent, and the only
+// thing that crosses a process boundary.
+type SpanCtx = { trace_id: String, span_id: String }
+
+type Span = {
+  trace_id: String,
+  span_id: String,
+  parent_span_id: Option[String],  // none = root
+  name: String,
+  kind: SpanKind,
+  start_ns: Int,
+  end_ns: Int,
+  attrs: List[(String, AttrValue)],
+  status: SpanStatus,
+}
+
+// The spelling Jaeger shows. A `fn SpanKind.repr` override would be the
+// idiomatic way to get this into `"${kind}"`, but a custom repr does not
+// resolve across a module boundary in 0.53.1 — interpolation silently falls
+// back to the variant name — so the name is an ordinary function that says
+// what it does everywhere.
+fn kind_name(k: SpanKind) -> String = match k {
+  Internal => "internal",
+  Server   => "server",
+  Client   => "client",
+  Producer => "producer",
+  Consumer => "consumer",
+}
+
+// ── Transformers ────────────────────────────────────────────────────────
+// Every function here takes the span first, so they compose with `|>` into
+// a chain that reads top-to-bottom as the span's life story. The tracer
+// never appears: nothing below needs a clock or an id.
+
+fn attr(s: Span, key: String, v: AttrValue) -> Span =
+  { ...s, attrs: s.attrs + [(key, v)] }
+
+fn succeed(s: Span) -> Span = { ...s, status: Success }
+
+fn fail(s: Span, msg: String) -> Span = { ...s, status: Failure(msg) }
+
+fn ctx(s: Span) -> SpanCtx = SpanCtx { trace_id: s.trace_id, span_id: s.span_id }
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+fn fixture() -> Span =
+  Span {
+    trace_id: "t", span_id: "s", parent_span_id: none, name: "n",
+    kind: Internal, start_ns: 0, end_ns: 0, attrs: [], status: Unset,
+  }
+
+test "every span kind has a name" where [
+  "internal" [k = Internal, want = "internal"],
+  "server"   [k = Server,   want = "server"],
+  "client"   [k = Client,   want = "client"],
+  "producer" [k = Producer, want = "producer"],
+  "consumer" [k = Consumer, want = "consumer"],
+] {
+  assert_eq(kind_name(k), want)
+}
+
+test "the builder chain records attributes in order" {
+  let s = fixture()
+    |> attr("a", Int64(1))
+    |> attr("b", Bool(false))
+  assert_eq(list.len(s.attrs), 2)
+  assert_eq(s.attrs, [("a", Int64(1)), ("b", Bool(false))])
+}
+
+test "a span starts Unset and ends however it is told" {
+  assert_eq(fixture().status, Unset)
+  assert_eq(succeed(fixture()).status, Success)
+  assert_eq(fail(fixture(), "nope").status, Failure("nope"))
+}
+
+// `ctx` is what a child parents itself to AND what the traceparent header
+// serializes, so the two can never disagree about identity.
+test "ctx carries exactly the identity a child needs" {
+  let s = { ...fixture(), trace_id: "aa", span_id: "bb" }
+  assert_eq(ctx(s), SpanCtx { trace_id: "aa", span_id: "bb" })
+}
