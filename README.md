@@ -98,7 +98,7 @@ A service imports `otel` for the tracer, `span` for the span's verbs, and `w3c` 
 
 **Timestamps.** `datetime.now()` is second-precision, which is useless for span durations. The SDK anchors the wall clock once at tracer creation and derives every timestamp from `datetime.monotonic_ns()` — the same trick production OTel SDKs use. OTLP's fixed64 nano fields are JSON *strings*, per the proto3 JSON mapping.
 
-**Propagation.** The client span serializes to `00-{trace_id}-{span_id}-01` and rides the request as a `traceparent` header. The server reads it back with `http.req_header(req, "traceparent")` and parents its span there. A missing *or* malformed header yields `none`, which starts a new trace rather than corrupting the caller's — every check in `parse_traceparent` is a MUST from the W3C recommendation, including the all-zero ids that the spec defines as invalid.
+**Propagation.** The client span serializes to `00-{trace_id}-{span_id}-01` and rides the request as a `traceparent` header. The server reads it back with `http.header(req, "traceparent")` and parents its span there. A missing *or* malformed header yields `none`, which starts a new trace rather than corrupting the caller's — every check in `parse_traceparent` is a MUST from the W3C recommendation, including the all-zero ids that the spec defines as invalid.
 
 **Export.** One `POST` per batch to `http://localhost:4318/v1/traces`. A `{"partialSuccess":{}}` response means Jaeger accepted everything.
 

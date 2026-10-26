@@ -9,6 +9,7 @@ import process
 import self.otel
 import self.span
 import self.w3c
+import env
 
 let INVENTORY = "http://localhost:7002/inventory"
 
@@ -28,7 +29,7 @@ effect fn main() -> Unit = {
   // into the header. One value, two consumers — the local span tree and the
   // remote one cannot disagree about who the parent is.
   let call = otel.child(t, span.ctx(checkout), "GET /inventory", span.Client)!
-  let resp = http.request("GET", INVENTORY, "", ["traceparent": w3c.traceparent(span.ctx(call))])
+  let resp = http.request("GET", INVENTORY, "", [("traceparent", w3c.traceparent(span.ctx(call)))])
 
   let called = call
     |> span.attr("http.method", span.Str("GET"))
@@ -42,7 +43,7 @@ effect fn main() -> Unit = {
     err(e) => span.fail(called, e),
   } |> otel.finish(t)!
 
-  process.sleep(10)  // simulated post-processing
+  env.sleep_ms(int.max(10, 0))  // simulated post-processing
   let checkout_done = checkout |> span.succeed |> otel.finish(t)!
 
   let _ = otel.export(t, [checkout_done, call_done])!

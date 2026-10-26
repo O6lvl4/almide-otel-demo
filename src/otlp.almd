@@ -106,14 +106,14 @@ fn document(service: String, spans: List[span.Span]) -> Payload =
 
 // The entire exporter minus the socket.
 fn payload(service: String, spans: List[span.Span]) -> String =
-  json.encode(document(service, spans))
+  json.stringify(document(service, spans))
 
 // ── Tests ───────────────────────────────────────────────────────────────
 // `json.encode(x)` IS `stringify` over the derived `encode`, in one call.
 
-fn attr_json(v: span.AttrValue) -> String = json.encode(any_value(v))
-fn status_json(s: span.SpanStatus) -> String = json.encode(status_wire(s))
-fn span_json(s: span.Span) -> String = json.encode(span_wire(s))
+fn attr_json(v: span.AttrValue) -> String = json.stringify(any_value(v))
+fn status_json(s: span.SpanStatus) -> String = json.stringify(status_wire(s))
+fn span_json(s: span.Span) -> String = json.stringify(span_wire(s))
 
 fn fixture() -> span.Span =
   span.Span {

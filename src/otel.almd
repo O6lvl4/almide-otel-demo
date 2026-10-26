@@ -77,8 +77,7 @@ effect fn finish(s: span.Span, t: Tracer) -> span.Span = { ...s, end_ns: now_ns(
 
 // Returns the collector's response body ({"partialSuccess":{}} = accepted).
 effect fn export(t: Tracer, spans: List[span.Span]) -> String =
-  http.request("POST", t.endpoint, otlp.payload(t.service, spans),
-    ["Content-Type": "application/json"])!
+  http.request("POST", t.endpoint, otlp.payload(t.service, spans), [("Content-Type", "application/json")])!
 
 // ── Tests ───────────────────────────────────────────────────────────────
 // A test block may call effect fns directly, so the id and parenting rules
