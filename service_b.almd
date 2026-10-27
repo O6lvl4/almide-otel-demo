@@ -2,7 +2,6 @@
 // a simulated-DB child span, and exports both.
 import http
 import json
-import process
 import self.otel
 import self.span
 import self.w3c
@@ -36,7 +35,7 @@ effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
   let inbound_done = inbound |> span.succeed |> otel.finish(t)!
   let _ = otel.export(t, [inbound_done, db_done])!
 
-  json.stringify(InventoryResp { items: ITEMS, trace: inbound_done.trace_id })
+  json.encode(InventoryResp { items: ITEMS, trace: inbound_done.trace_id })
 }
 
 effect fn main() -> Unit = {
@@ -48,6 +47,6 @@ effect fn main() -> Unit = {
   http.serve(PORT, (req) =>
     match handle(t, req) {
       ok(body) => http.json(200, body),
-      err(e) => http.json(500, json.stringify(ErrorResp { error: e })),
+      err(e) => http.json(500, json.encode(ErrorResp { error: e })),
     })
 }

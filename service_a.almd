@@ -5,7 +5,6 @@
 // socket, `span` owns the span's own verbs, `w3c` owns the header. The
 // wire format never appears here — that is `otel.export`'s business.
 import http
-import process
 import self.otel
 import self.span
 import self.w3c
