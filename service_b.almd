@@ -13,7 +13,13 @@ type ErrorResp: Codec = { error: String }
 let ITEMS = ["potion", "elixir"]
 let PORT = 7002
 
-effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
+let SERVICE = "almide-inventory"
+
+effect fn handle(req: HttpRequest) -> String = {
+  // The tracer is built per request: the app runs in several instances
+  // (one per worker, or one per request on a wasi:http host), so it cannot
+  // capture a local of main.
+  let t = otel.tracer(SERVICE)!
   // A header that is missing OR malformed yields `none`, and `none` starts
   // a new trace. This is the one call site that wants the raw Option form
   // of `start`: whether a parent exists is genuinely unknown here, which is
@@ -39,13 +45,12 @@ effect fn handle(t: otel.Tracer, req: HttpRequest) -> String = {
 }
 
 effect fn main() -> Unit = {
-  let t = otel.tracer("almide-inventory")!
   println("inventory service listening on http://localhost:${PORT}")
   // `!` cannot cross a closure boundary, so the handler's Result is matched
   // here rather than propagated — which is what turns a handler failure
   // into a 500 instead of a dropped connection.
   http.serve(PORT, (req) =>
-    match handle(t, req) {
+    match handle(req) {
       ok(body) => http.json(200, body),
       err(e) => http.json(500, json.encode(ErrorResp { error: e })),
     })
