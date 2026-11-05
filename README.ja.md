@@ -98,7 +98,7 @@ span ← otlp ← otel
 
 **タイムスタンプ。** `datetime.now()` は秒精度で、spanのdurationには使いものになりません。SDKはtracer生成時にwall clockを一度だけアンカーし、以後のすべてのタイムスタンプを `datetime.monotonic_ns()` から導出します — 本物のOTel SDKと同じ手法です。OTLPのfixed64ナノ秒フィールドは、proto3 JSONマッピングの規定によりJSONでは*文字列*になります。
 
-**伝播。** クライアントspanは `00-{trace_id}-{span_id}-01` にシリアライズされ、`traceparent` ヘッダとしてリクエストに乗ります。サーバ側は `http.req_header(req, "traceparent")` で読み戻し、そこに自分のspanをぶら下げます。ヘッダが無い場合**も**壊れている場合も `none` になり、呼び出し元のトレースを汚さずに新しいトレースを開始します——`parse_traceparent` のチェックはすべてW3C勧告のMUSTで、仕様が無効と定める全ゼロのIDも含みます。
+**伝播。** クライアントspanは `00-{trace_id}-{span_id}-01` にシリアライズされ、`traceparent` ヘッダとしてリクエストに乗ります。サーバ側は `http.header(req, "traceparent")` で読み戻し、そこに自分のspanをぶら下げます。ヘッダが無い場合**も**壊れている場合も `none` になり、呼び出し元のトレースを汚さずに新しいトレースを開始します——`parse_traceparent` のチェックはすべてW3C勧告のMUSTで、仕様が無効と定める全ゼロのIDも含みます。
 
 **エクスポート。** バッチごとに `http://localhost:4318/v1/traces` へPOST 1回。レスポンスが `{"partialSuccess":{}}` なら全部受理されています。
 

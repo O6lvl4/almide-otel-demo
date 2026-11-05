@@ -10,7 +10,7 @@ import json
 import http
 import random
 import hex
-import process
+import env
 
 let COLLECTOR = "http://localhost:4318/v1/traces"
 
@@ -85,11 +85,11 @@ effect fn main() -> Unit = {
   let span_id = rand_hex(8)!
 
   let start_ns = anchor + datetime.monotonic_ns()
-  process.sleep(42)
+  env.sleep_ms(int.max(42, 0))
   let end_ns = anchor + datetime.monotonic_ns()
 
   let body = json.encode(document(trace_id, span_id, start_ns, end_ns))
-  let resp = http.request("POST", COLLECTOR, body, ["Content-Type": "application/json"])!
+  let resp = http.request("POST", COLLECTOR, body, [("Content-Type", "application/json")])!
   println("exporter response: ${resp}")
   println("trace_id: ${trace_id}")
 }
